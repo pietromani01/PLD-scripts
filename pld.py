@@ -1,42 +1,78 @@
-import numpy as np
 from pathlib import Path
+
 import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+from numpy.typing import NDArray
+
+FrameArray = NDArray[np.int64]
 
 
-def make_video(input_path: Path | str, fps: int = 2) -> None:
-    fps = 2  # 1 frame per 0.5s → 2 FPS
+class PLDAnalyzer:
+    frames: FrameArray = np.array([])
 
-    workdir = Path(input_path).absolute()
+    def load_data(self, data_path: Path | str) -> None:
+        data_path = Path(data_path).absolute()
 
-    data_files = sorted(workdir.glob("*.npy"))
+        if not data_path.exists():
+            raise FileNotFoundError(f"File not found: {data_path}")
 
-    frame: np.ndarray = np.load(data_files[0])
-    height, width = frame.shape[:2]
+        if data_path.is_file():
+            if data_path.suffix == ".npy":
+                self.frames = np.load(data_path)
+                if self.frames.ndim == 2:
+                    self.frames = self.frames[np.newaxis, ...]
+            else:
+                raise ValueError("Unsupported file format")
 
-    # Ensure the array is in uint8 format (0-255) for OpenCV
-    frame = (frame * 255).astype(np.uint8) if frame.dtype != np.uint8 else frame
+        elif data_path.is_dir():
+            data_files = sorted(data_path.glob("*.npy"))
+            if not data_files:
+                raise FileNotFoundError(f"No supported data files found in {data_path}")
 
-    # Define video writer
-    fourcc = cv2.VideoWriter.fourcc(*"mp4v")  # Use 'XVID' for AVI
-    video_writer = cv2.VideoWriter(
-        filename=workdir / "video.mp4",
-        fourcc=fourcc,
-        fps=fps,
-        frameSize=(width, height),
-    )
+            frames = [np.load(file) for file in data_files]
+            self.frames = np.stack(frames, axis=0)
 
-    for data_file in data_files:
-        frame = np.load(data_file)
+        else:
+            raise ValueError("Invalid path")
 
-        # Convert data to 8-bit image format if needed
-        if frame.dtype != np.uint8:
-            frame = (frame * 255).astype(np.uint8)
+    def plot_frame(self, index: int) -> None:
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
 
-        # Convert grayscale to BGR (needed for OpenCV)
-        if len(frame.shape) == 2:  # Grayscale
+        if index >= self.frames.shape[0]:
+            raise IndexError("Frame index out of range")
+
+        plt.imshow(self.frames[index], cmap="gray")
+        plt.axis("off")
+        plt.show()
+
+    def make_video(self, fps: int = 2, outdir: Path | str = ".") -> None:
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
+
+        outdir = Path(outdir).absolute()
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        height, width = self.frames.shape[1:]
+
+        fourcc = cv2.VideoWriter.fourcc(*"mp4v")
+        video_writer = cv2.VideoWriter(
+            str(outdir / "video.mp4"), fourcc, fps, (width, height)
+        )
+
+        for frame in self.frames:
+            frame = cv2.normalize(
+                frame,
+                None,
+                alpha=0,
+                beta=255,
+                norm_type=cv2.NORM_MINMAX,
+            ).astype(np.uint8)  # type: ignore
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            video_writer.write(frame)
 
-        video_writer.write(frame)
+        video_writer.release()
 
-    # Release resources
-    video_writer.release()
+    def extract_roi(self):
+        pass
