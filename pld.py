@@ -3,10 +3,12 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-from numpy.typing import NDArray
 import scipy.ndimage as ndi
-
+from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
+from numpy.typing import NDArray
+from skimage.feature import peak_local_max
 
 FrameArray = NDArray[np.int64]
 
@@ -26,77 +28,81 @@ class RHEEDFrame:
     def __init__(
         self,
         frame_data: FrameArray,
-        roi: tuple[int, int, int, int] | None = None,
         outdir: Path | str = Path("."),
     ) -> None:
         self.data = frame_data
-        self.roi = roi
         self.outdir = Path(outdir).absolute()
 
     @property
     def dimensions(self) -> tuple[int, int]:
         return self.data.shape[:2]  # type: ignore
 
-    def center(self) -> "RHEEDFrame":
-        if self.roi is None:
-            raise ValueError("ROI not defined")
-
-        x_min, x_max, y_min, y_max = self.roi
-        x_center = (x_min + x_max) // 2
-        y_center = (y_min + y_max) // 2
-
-        x_offset = self.data.shape[1] // 2 - x_center
-        y_offset = self.data.shape[0] // 2 - y_center
-
-        self.data = np.roll(self.data, x_offset, axis=1)
-        self.data = np.roll(self.data, y_offset, axis=0)
-
-        self.roi = (
-            self.roi[0] + x_offset,
-            self.roi[1] + x_offset,
-            self.roi[2] + y_offset,
-            self.roi[3] + y_offset,
-        )
-
-        return self
-
-    def crop(self, top=0, bottom=0, left=0, right=0) -> "RHEEDFrame":
-        if top:
-            self.data = self.data[top:, :]
-        if bottom:
-            self.data = self.data[:-bottom, :]
-        if left:
-            self.data = self.data[:, left:]
-        if right:
-            self.data = self.data[:, :-right]
-        return self
-
     def smooth(self, sigma: int = 2):
         self.data = ndi.gaussian_filter(self.data, sigma=sigma)
         return self
 
+    def extract_peak_roi(
+        self,
+        min_distance: int = 15,
+        width: int = 12,
+        height: int = 50,
+    ):
+        coordinates = self._get_peak_coordinates(min_distance)
+        return [
+            [
+                y - height // 2,
+                y + height // 2,
+                x - width // 2,
+                x + width // 2,
+            ]
+            for y, x in coordinates
+        ]
+
+    def _get_peak_coordinates(self, min_distance: int = 15) -> list[tuple[int, int]]:
+        coordinates = peak_local_max(self.data, min_distance=min_distance)
+        coordinates = sorted(coordinates, key=lambda c: c[1])  # by x coordinate
+        image_center_x = self.data.shape[1] // 2
+        return sorted(coordinates, key=lambda c: abs(c[1] - image_center_x))[:3]
+
     def plot(
         self,
         figsize: tuple[int, int] = (8, 6),
+        show_roi: bool = False,
         save: bool = False,
     ):
-        plt.figure(figsize=figsize)
-        plt.imshow(self.data, cmap=MATRIX_CMAP)
+        _, ax = plt.subplots(figsize=figsize)
+        ax.imshow(self.data, cmap=MATRIX_CMAP)
         plt.axis("off")
 
-        if self.roi:
-            x_min, x_max, y_min, y_max = self.roi
-            plt.plot(
-                [x_min, x_max, x_max, x_min, x_min],
-                [y_min, y_min, y_max, y_max, y_min],
-                color="red",
-                linewidth=2,
-            )
+        if show_roi:
+            self.plot_roi(ax)
 
         if save:
             plt.savefig(self.outdir / "frame.png")
 
         plt.show()
+
+    def plot_roi(self, ax: Axes):
+        roi = self.extract_peak_roi()
+        colors = ["blue", "red", "lime"]
+        for i, (top, bottom, left, right) in enumerate(roi):
+            rect = Rectangle(
+                (left, top),
+                right - left,
+                bottom - top,
+                edgecolor=colors[i],
+                facecolor="none",
+                linewidth=2,
+                label=f"Peak {i + 1}",
+            )
+            ax.text(
+                right - (right - left) // 2 - 1,
+                top - 2,
+                f"{i + 1}",
+                color=colors[i],
+                fontsize=12,
+            )
+            ax.add_patch(rect)
 
 
 class RHEEDAnalyzer:
@@ -131,9 +137,10 @@ class RHEEDAnalyzer:
 
     def crop_to_roi(
         self,
-        margins: tuple[int, int] | tuple[int, int, int, int] = (10, 10),
+        threshold: float = 0.8,
+        margins: tuple[int, int] | tuple[int, int, int, int] = (40, 40, -20, 40),
     ) -> None:
-        roi = self.extract_roi()
+        roi = self.extract_roi(threshold)
         if len(margins) == 2:
             mx, my = margins
             roi = [
@@ -152,19 +159,6 @@ class RHEEDAnalyzer:
             ]
         self.frames = self.frames[:, roi[2] : roi[3], roi[0] : roi[1]]
 
-    def get_frame(self, index: int) -> RHEEDFrame:
-        if self.frames.size == 0:
-            raise ValueError("No data loaded")
-
-        if index >= self.frames.shape[0]:
-            raise IndexError("Frame index out of range")
-
-        return RHEEDFrame(self.frames[index], self.roi, self.outdir)
-
-    def set_outdir(self, outdir: Path | str = ".") -> None:
-        self.outdir = Path(outdir).absolute()
-        self.outdir.mkdir(parents=True, exist_ok=True)
-
     def extract_roi(self, threshold: float = 0.8) -> list[np.intp]:
         if self.frames.size == 0:
             raise ValueError("No data loaded")
@@ -182,6 +176,19 @@ class RHEEDAnalyzer:
         y_min, y_max = np.min(y_indices), np.max(y_indices)
 
         return [x_min, x_max, y_min, y_max]
+
+    def get_frame(self, index: int) -> RHEEDFrame:
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
+
+        if index >= self.frames.shape[0]:
+            raise IndexError("Frame index out of range")
+
+        return RHEEDFrame(self.frames[index], self.outdir)
+
+    def set_outdir(self, outdir: Path | str = ".") -> None:
+        self.outdir = Path(outdir).absolute()
+        self.outdir.mkdir(parents=True, exist_ok=True)
 
     def make_video(self, fps: int = 2) -> None:
         if self.frames.size == 0:
