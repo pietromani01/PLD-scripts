@@ -41,13 +41,13 @@ class RHEEDFrame:
         self.data = ndi.gaussian_filter(self.data, sigma=sigma)
         return self
 
-    def extract_peak_roi(
+    def extract_regions_of_interest(
         self,
         min_distance: int = 15,
         width: int = 12,
         height: int = 50,
     ):
-        coordinates = self._get_peak_coordinates(min_distance)
+        coordinates = self.get_peak_coordinates(min_distance)
         return [
             [
                 y - height // 2,
@@ -58,7 +58,7 @@ class RHEEDFrame:
             for y, x in coordinates
         ]
 
-    def _get_peak_coordinates(self, min_distance: int = 15) -> list[tuple[int, int]]:
+    def get_peak_coordinates(self, min_distance: int = 15) -> list[tuple[int, int]]:
         coordinates = peak_local_max(self.data, min_distance=min_distance)
         coordinates = sorted(coordinates, key=lambda c: c[1])  # by x coordinate
         image_center_x = self.data.shape[1] // 2
@@ -75,15 +75,15 @@ class RHEEDFrame:
         plt.axis("off")
 
         if show_roi:
-            self.plot_roi(ax)
+            self.plot_regions_of_interest(ax)
 
         if save:
             plt.savefig(self.outdir / "frame.png")
 
         plt.show()
 
-    def plot_roi(self, ax: Axes):
-        roi = self.extract_peak_roi()
+    def plot_regions_of_interest(self, ax: Axes):
+        roi = self.extract_regions_of_interest()
         colors = ["blue", "red", "lime"]
         for i, (top, bottom, left, right) in enumerate(roi):
             rect = Rectangle(
@@ -107,7 +107,6 @@ class RHEEDFrame:
 
 class RHEEDAnalyzer:
     frames: FrameArray = np.array([])
-    roi: tuple[int, int, int, int] | None = None
     outdir = Path(".")
 
     def load_data(self, data_path: Path | str) -> None:
@@ -135,12 +134,12 @@ class RHEEDAnalyzer:
         else:
             raise ValueError("Invalid path")
 
-    def crop_to_roi(
+    def crop_to_region_of_interest(
         self,
         threshold: float = 0.8,
         margins: tuple[int, int] | tuple[int, int, int, int] = (40, 40, -20, 40),
     ) -> None:
-        roi = self.extract_roi(threshold)
+        roi = self.extract_region_of_interest(threshold)
         if len(margins) == 2:
             mx, my = margins
             roi = [
@@ -159,7 +158,7 @@ class RHEEDAnalyzer:
             ]
         self.frames = self.frames[:, roi[2] : roi[3], roi[0] : roi[1]]
 
-    def extract_roi(self, threshold: float = 0.8) -> list[np.intp]:
+    def extract_region_of_interest(self, threshold: float = 0.8) -> list[np.intp]:
         if self.frames.size == 0:
             raise ValueError("No data loaded")
 
