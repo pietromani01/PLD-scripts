@@ -1,37 +1,35 @@
+from datetime import datetime
 from pathlib import Path
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import scipy.ndimage as ndi
-from matplotlib.axes import Axes
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.patches import Rectangle
 from numpy.typing import NDArray
 from skimage.feature import peak_local_max
 
 FrameArray = NDArray[np.int64]
 
-MATRIX_CMAP = LinearSegmentedColormap.from_list(
-    "matrix_cmap",
-    [
-        (0, "black"),
-        (0.4, "#002500"),
-        (0.6, "#005000"),
-        (0.8, "#007500"),
-        (1, "lime"),
-    ],
-)
+MATRIX_COLORSCALE = [
+    (0.00, "black"),
+    (0.40, "#002500"),
+    (0.60, "#005000"),
+    (0.80, "#007500"),
+    (1.00, "lime"),
+]
 
 
 class RHEEDFrame:
     def __init__(
         self,
+        frame_index: int,
         frame_data: FrameArray,
         outdir: Path | str = Path("."),
     ) -> None:
+        self.index = frame_index
         self.data = frame_data
         self.outdir = Path(outdir).absolute()
+        self.ROIs = []
 
     @property
     def dimensions(self) -> tuple[int, int]:
@@ -39,17 +37,17 @@ class RHEEDFrame:
 
     def smooth(self, sigma: int = 2):
         data = ndi.gaussian_filter(self.data, sigma=sigma)
-        return RHEEDFrame(data, self.outdir)
+        return RHEEDFrame(self.index, data, self.outdir)
 
     # TODO using fix width/height - do we require more flexibility?
-    def extract_regions_of_interest(
+    def define_regions_of_interest(
         self,
-        min_distance: int = 15,
+        min_distance: int = 18,
         width: int = 12,
         height: int = 50,
     ):
         coordinates = self.get_peak_coordinates(min_distance)
-        return [
+        self.ROIs = [
             [
                 y - height // 2,
                 y + height // 2,
@@ -65,82 +63,123 @@ class RHEEDFrame:
         image_center_x = self.data.shape[1] // 2
         return sorted(coordinates, key=lambda c: abs(c[1] - image_center_x))[:3]
 
+    def get_peak_intensities(self) -> list[np.int64]:
+        if not self.ROIs:
+            print(self.index)
+            raise ValueError("No regions of interest (ROIs) defined")
+        return [
+            np.max(self.data[top:bottom, left:right])
+            for top, bottom, left, right in self.ROIs
+        ]
+
     def plot(
         self,
         figsize: tuple[int, int] = (8, 6),
         show_regions_of_interest: bool = False,
         save: bool = False,
     ):
-        _, ax = plt.subplots(figsize=figsize)
-        ax.imshow(self.data, cmap=MATRIX_CMAP)
-        plt.axis("off")
+        fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
 
+        # Add heatmap of data
+        fig.add_trace(
+            go.Heatmap(
+                z=self.data,
+                colorscale=MATRIX_COLORSCALE,
+                showscale=False,
+            )
+        )
+
+        # Add Regions of Interest (ROIs) if requested
         if show_regions_of_interest:
-            self.plot_regions_of_interest(ax)
+            self.plot_regions_of_interest(fig)
 
+        fig.update_layout(
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False, scaleanchor="x", autorange="reversed"),
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=0, r=0, t=0, b=0),
+        )
+
+        # Save as interactive HTML if needed
         if save:
-            plt.savefig(self.outdir / "frame.png")
+            fig.write_html(str(self.outdir / "frame.html"))
 
-        plt.show()
+        fig.show(config={"displayModeBar": False})
 
-    def plot_regions_of_interest(self, ax: Axes):
-        ROIs = self.extract_regions_of_interest()
+    def plot_regions_of_interest(self, fig: go.Figure):
+        if not self.ROIs:
+            raise ValueError("No regions of interest (ROIs) defined")
         colors = ["blue", "red", "lime"]
-        for i, (top, bottom, left, right) in enumerate(ROIs):
-            rect = Rectangle(
-                (left, top),
-                right - left,
-                bottom - top,
-                edgecolor=colors[i],
-                facecolor="none",
-                linewidth=2,
-                label=f"Peak {i + 1}",
+        for i, (top, bottom, left, right) in enumerate(self.ROIs):
+            fig.add_shape(
+                type="rect",
+                x0=left,
+                x1=right,
+                y0=top,
+                y1=bottom,
+                line=dict(color=colors[i], width=2),
             )
-            ax.text(
-                right - (right - left) // 2 - 1,
-                top - 2,
-                f"{i + 1}",
-                color=colors[i],
-                fontsize=12,
+            fig.add_annotation(
+                x=(left + right) / 2,
+                y=top - 2,
+                text=f"{i + 1}",
+                showarrow=False,
+                font=dict(size=12, color=colors[i]),
             )
-            ax.add_patch(rect)
 
 
 class RHEEDAnalyzer:
     frames: FrameArray = np.array([])
+    timestamps: list[datetime] = []
     outdir = Path(".")
 
     def load_data(self, data_path: Path | str) -> None:
         data_path = Path(data_path).absolute()
-
         if not data_path.exists():
             raise FileNotFoundError(f"File not found: {data_path}")
-
         if data_path.is_file():
-            if data_path.suffix == ".npy":
-                self.frames = np.load(data_path)
-                if self.frames.ndim == 2:
-                    self.frames = self.frames[np.newaxis, ...]
-            else:
-                raise ValueError("Unsupported file format")
-
+            self.load_single_data_file(data_path)
         elif data_path.is_dir():
-            data_files = sorted(data_path.glob("*.npy"))
-            if not data_files:
-                raise FileNotFoundError(f"No supported data files found in {data_path}")
-
-            frames = [np.load(file) for file in data_files]
-            self.frames = np.stack(frames, axis=0)
-
+            self.load_multiple_data_files(data_path)
         else:
             raise ValueError("Invalid path")
 
-    def crop_to_region_of_interest(
+    def load_single_data_file(self, data_path: Path):
+        if data_path.suffix == ".npy":
+            self.frames = np.load(data_path)
+            self.timestamps.append(self.extract_timestamp(data_path))
+            if self.frames.ndim == 2:
+                self.frames = self.frames[np.newaxis, ...]
+        else:
+            raise ValueError("Unsupported file format")
+
+    def load_multiple_data_files(self, data_path: Path):
+        data_files = sorted(data_path.glob("*.npy"))
+        if not data_files:
+            raise FileNotFoundError(f"No supported data files found in {data_path}")
+        frames = []
+        timestamps = []
+        for data_file in data_files:
+            frames.append(np.load(data_file))
+            try:
+                timestamps.append(self.extract_timestamp(data_file))
+            except Exception:
+                print(f"Could not extract timestamp from {data_file.name}")
+        self.timestamps = timestamps
+        self.frames = np.stack(frames, axis=0)
+
+    def extract_timestamp(self, data_path: Path):
+        return datetime.strptime(
+            data_path.name.split("_frame")[0],
+            r"%Y%m%d_%H%M%S%f",
+        )
+
+    def crop_to_global_region_of_interest(
         self,
         threshold: float = 0.8,
         margins: tuple[int, int] | tuple[int, int, int, int] = (40, 40, -20, 40),
     ) -> None:
-        ROI = self.extract_region_of_interest(threshold)
+        ROI = self.extract_global_region_of_interest(threshold)
         if len(margins) == 2:
             mx, my = margins
             ROI = [
@@ -159,7 +198,10 @@ class RHEEDAnalyzer:
             ]
         self.frames = self.frames[:, ROI[2] : ROI[3], ROI[0] : ROI[1]]
 
-    def extract_region_of_interest(self, threshold: float = 0.8) -> list[np.intp]:
+    def extract_global_region_of_interest(
+        self,
+        threshold: float = 0.8,
+    ) -> list[np.intp]:
         if self.frames.size == 0:
             raise ValueError("No data loaded")
 
@@ -184,7 +226,7 @@ class RHEEDAnalyzer:
         if index >= self.frames.shape[0]:
             raise IndexError("Frame index out of range")
 
-        return RHEEDFrame(self.frames[index], self.outdir)
+        return RHEEDFrame(index, self.frames[index], self.outdir)
 
     def set_outdir(self, outdir: Path | str = ".") -> None:
         self.outdir = Path(outdir).absolute()
@@ -216,3 +258,75 @@ class RHEEDAnalyzer:
             video_writer.write(frame)
 
         video_writer.release()
+
+    def plot_intensity_time_series(
+        self,
+        sigma: int = 0,
+        min_distance: int = 18,
+        figsize: tuple[int, int] = (12, 6),
+        save: bool = False,
+    ) -> None:
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
+
+        if not self.timestamps:
+            raise ValueError("No timestamps available")
+
+        peak_intensities = [[] for _ in range(3)]
+
+        for i, frame in enumerate(self.frames):
+            rheed_frame = RHEEDFrame(i, frame)
+            if sigma:
+                rheed_frame = rheed_frame.smooth(sigma)
+            rheed_frame.define_regions_of_interest(min_distance)
+            intensities = rheed_frame.get_peak_intensities()
+
+            for j in range(3):
+                intensity = intensities[j] if j < len(intensities) else None
+                peak_intensities[j].append(intensity)
+
+        fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
+
+        colors = ["blue", "red", "lime"]
+        labels = [f"Peak {i + 1}" for i in range(3)]
+
+        maximum_intensity = np.max(peak_intensities)
+        for i in range(3):
+            fig.add_trace(
+                go.Scatter(
+                    x=self.timestamps,
+                    y=peak_intensities[i] / maximum_intensity,
+                    mode="lines",
+                    name=labels[i],
+                    line=dict(color=colors[i], width=2),
+                    hovertemplate="Frame: %{customdata}<br>Time: %{x|%H:%M:%S}<br>Intensity: %{y}",
+                    customdata=np.arange(len(self.timestamps)),
+                    hoverlabel=dict(namelength=0),
+                )
+            )
+
+        fig.update_layout(
+            yaxis_title="Peak Max Intensity",
+            xaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+                tickangle=45,
+                tickformat="%H:%M",
+                dtick=60000,
+            ),
+            yaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=20, b=20),
+            template="plotly_white",
+        )
+
+        # Save as interactive HTML if needed
+        if save:
+            fig.write_html(str(self.outdir / "intensity_timeseries.html"))
+
+        fig.show(config={"displayModeBar": False})
