@@ -38,9 +38,10 @@ class RHEEDFrame:
         return self.data.shape[:2]  # type: ignore
 
     def smooth(self, sigma: int = 2):
-        self.data = ndi.gaussian_filter(self.data, sigma=sigma)
-        return self
+        data = ndi.gaussian_filter(self.data, sigma=sigma)
+        return RHEEDFrame(data, self.outdir)
 
+    # TODO using fix width/height - do we require more flexibility?
     def extract_regions_of_interest(
         self,
         min_distance: int = 15,
@@ -67,14 +68,14 @@ class RHEEDFrame:
     def plot(
         self,
         figsize: tuple[int, int] = (8, 6),
-        show_roi: bool = False,
+        show_regions_of_interest: bool = False,
         save: bool = False,
     ):
         _, ax = plt.subplots(figsize=figsize)
         ax.imshow(self.data, cmap=MATRIX_CMAP)
         plt.axis("off")
 
-        if show_roi:
+        if show_regions_of_interest:
             self.plot_regions_of_interest(ax)
 
         if save:
@@ -83,9 +84,9 @@ class RHEEDFrame:
         plt.show()
 
     def plot_regions_of_interest(self, ax: Axes):
-        roi = self.extract_regions_of_interest()
+        ROIs = self.extract_regions_of_interest()
         colors = ["blue", "red", "lime"]
-        for i, (top, bottom, left, right) in enumerate(roi):
+        for i, (top, bottom, left, right) in enumerate(ROIs):
             rect = Rectangle(
                 (left, top),
                 right - left,
@@ -139,24 +140,24 @@ class RHEEDAnalyzer:
         threshold: float = 0.8,
         margins: tuple[int, int] | tuple[int, int, int, int] = (40, 40, -20, 40),
     ) -> None:
-        roi = self.extract_region_of_interest(threshold)
+        ROI = self.extract_region_of_interest(threshold)
         if len(margins) == 2:
             mx, my = margins
-            roi = [
-                max(0, roi[0] - mx),
-                min(self.frames.shape[2], roi[1] + mx),
-                max(0, roi[2] - my),
-                min(self.frames.shape[1], roi[3] + my),
+            ROI = [
+                max(0, ROI[0] - mx),
+                min(self.frames.shape[2], ROI[1] + mx),
+                max(0, ROI[2] - my),
+                min(self.frames.shape[1], ROI[3] + my),
             ]
         else:
             mt, mr, mb, ml = margins
-            roi = [
-                max(0, roi[0] - ml),
-                min(self.frames.shape[2], roi[1] + mr),
-                max(0, roi[2] - mt),
-                min(self.frames.shape[1], roi[3] + mb),
+            ROI = [
+                max(0, ROI[0] - ml),
+                min(self.frames.shape[2], ROI[1] + mr),
+                max(0, ROI[2] - mt),
+                min(self.frames.shape[1], ROI[3] + mb),
             ]
-        self.frames = self.frames[:, roi[2] : roi[3], roi[0] : roi[1]]
+        self.frames = self.frames[:, ROI[2] : ROI[3], ROI[0] : ROI[1]]
 
     def extract_region_of_interest(self, threshold: float = 0.8) -> list[np.intp]:
         if self.frames.size == 0:
