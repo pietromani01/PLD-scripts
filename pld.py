@@ -6,6 +6,8 @@ import numpy as np
 import plotly.graph_objects as go
 import scipy.ndimage as ndi
 from numpy.typing import NDArray
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 from skimage.feature import peak_local_max
 
 FrameArray = NDArray[np.int64]
@@ -327,3 +329,50 @@ class RHEEDAnalyzer:
             fig.write_html(str(self.outdir / "intensity_timeseries.html"))
 
         fig.show(config={"displayModeBar": False})
+
+    def compute_decay_rate(self, intensities: NDArray) -> float:
+        def exp_decay(t, I0, lambda_):
+            return I0 * np.exp(-lambda_ * t)
+
+        try:
+            popt, _ = curve_fit(
+                exp_decay, self.timestamps, intensities, p0=(intensities[0], 0.01)
+            )
+            return popt[1]  # lambda_
+        except RuntimeError:
+            print("Curve fitting failed; returning NaN")
+            return np.nan
+
+    def compute_oscillation_score(self, intensities: NDArray) -> float:
+        # Find peaks and valleys
+        peaks, _ = find_peaks(intensities)
+        valleys, _ = find_peaks(-intensities)
+
+        if len(peaks) == 0 or len(valleys) == 0:
+            return 0  # No oscillations detected
+
+        # Compute peak-to-valley differences
+        peak_vals = intensities[peaks]
+        valley_vals = intensities[valleys]
+        min_len = min(len(peak_vals), len(valley_vals))
+        peak_to_valley_diffs = np.abs(peak_vals[:min_len] - valley_vals[:min_len])
+
+        # Oscillation score: sum of differences weighted by count
+        return np.sum(peak_to_valley_diffs) * len(peaks)
+
+    def get_all_frames(self) -> list[RHEEDFrame]:
+        frames = []
+        for i, data in enumerate(self.frames):
+            frame = RHEEDFrame(i, data, self.outdir)
+            frame.define_regions_of_interest()
+            frames.append(frame)
+        return frames
+
+    def analyze_quality(self, ROI_index: int) -> dict:
+        intensities = np.array(
+            [frame.get_peak_intensities()[ROI_index] for frame in self.get_all_frames()]
+        )
+        return {
+            "decay_rate": self.compute_decay_rate(intensities),
+            "oscillation_score": self.compute_oscillation_score(intensities),
+        }
