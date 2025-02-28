@@ -159,20 +159,18 @@ class RHEEDAnalyzer:
             raise FileNotFoundError(f"No supported data files found in {data_path}")
         frames = []
         timestamps = []
+        timestamp_0 = self.extract_timestamp(data_files[0])
         for data_file in data_files:
             frames.append(np.load(data_file))
-            try:
-                timestamps.append(self.extract_timestamp(data_file))
-            except Exception:
-                print(f"Could not extract timestamp from {data_file.name}")
+            timestamps.append(self.extract_timestamp(data_file) - timestamp_0)
         self.timestamps = timestamps
         self.frames = np.stack(frames, axis=0)
 
-    def extract_timestamp(self, data_path: Path):
+    def extract_timestamp(self, data_path: Path) -> float:
         return datetime.strptime(
             data_path.name.split("_frame")[0],
             r"%Y%m%d_%H%M%S%f",
-        )
+        ).timestamp()
 
     def crop_to_global_region_of_interest(
         self,
@@ -299,21 +297,19 @@ class RHEEDAnalyzer:
                     mode="lines",
                     name=labels[i],
                     line=dict(color=colors[i], width=2),
-                    hovertemplate="Frame: %{customdata}<br>Time: %{x|%H:%M:%S}<br>Intensity: %{y}",
+                    hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>Intensity: %{y:.2f}",
                     customdata=np.arange(len(self.timestamps)),
                     hoverlabel=dict(namelength=0),
                 )
             )
 
         fig.update_layout(
-            yaxis_title="Peak Max Intensity",
+            xaxis_title="Time [s]",
+            yaxis_title="Peak Max Intensity [a.u.]",
             xaxis=dict(
                 showgrid=True,
                 showline=True,
                 linecolor="black",
-                tickangle=45,
-                tickformat="%H:%M",
-                dtick=60000,
             ),
             yaxis=dict(
                 showgrid=True,
