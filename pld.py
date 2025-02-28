@@ -75,6 +75,7 @@ class RHEEDFrame:
     def plot(
         self,
         figsize: tuple[int, int] = (8, 6),
+        colorscale: list[tuple[float, str]] | str = MATRIX_COLORSCALE,
         show_regions_of_interest: bool = False,
         save: bool = False,
     ):
@@ -84,7 +85,7 @@ class RHEEDFrame:
         fig.add_trace(
             go.Heatmap(
                 z=self.data,
-                colorscale=MATRIX_COLORSCALE,
+                colorscale=colorscale,
                 showscale=False,
             )
         )
