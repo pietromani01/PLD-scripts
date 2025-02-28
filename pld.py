@@ -11,11 +11,11 @@ from skimage.feature import peak_local_max
 FrameArray = NDArray[np.int64]
 
 MATRIX_COLORSCALE = [
-    (0.00, "black"),
-    (0.40, "#002500"),
-    (0.60, "#005000"),
-    (0.80, "#007500"),
-    (1.00, "lime"),
+    (0.00, "#000000"),  # Black
+    (0.60, "#0C2000"),  # Very dark green, almost black
+    (0.75, "#184000"),  # Deep green
+    (0.90, "#247F00"),  # Brighter green
+    (1.00, "#32FF00"),  # Neon lime green
 ]
 
 
