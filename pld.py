@@ -74,6 +74,10 @@ class RHEEDFrame:
             for top, bottom, left, right in self.ROIs
         ]
 
+    def get_laplacian_variance(self) -> float:
+        laplacian = cv2.Laplacian(self.data, cv2.CV_64F)
+        return laplacian.var()
+
     def plot(
         self,
         figsize: tuple[int, int] = (8, 6),
@@ -260,21 +264,12 @@ class RHEEDAnalyzer:
 
         video_writer.release()
 
-    def plot_intensity_time_series(
+    def get_peak_intensities(
         self,
         sigma: int = 0,
         min_distance: int = 18,
-        figsize: tuple[int, int] = (12, 6),
-        save: bool = False,
-    ) -> None:
-        if self.frames.size == 0:
-            raise ValueError("No data loaded")
-
-        if not self.timestamps:
-            raise ValueError("No timestamps available")
-
+    ) -> list[list[np.int64]]:
         peak_intensities = [[] for _ in range(3)]
-
         for i, frame in enumerate(self.frames):
             rheed_frame = RHEEDFrame(i, frame)
             if sigma:
@@ -285,18 +280,37 @@ class RHEEDAnalyzer:
             for j in range(3):
                 intensity = intensities[j] if j < len(intensities) else None
                 peak_intensities[j].append(intensity)
+        return peak_intensities
+
+    def get_laplacian_variances(self) -> list[float]:
+        return [
+            RHEEDFrame(i, frame).get_laplacian_variance()
+            for i, frame in enumerate(self.frames)
+        ]
+
+    def plot_intensity_time_series(
+        self,
+        data: list[list[np.int64]],
+        figsize: tuple[int, int] = (12, 6),
+        save: bool = False,
+    ) -> None:
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
+
+        if not self.timestamps:
+            raise ValueError("No timestamps available")
 
         fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
 
         colors = ["blue", "red", "lime"]
         labels = [f"Peak {i + 1}" for i in range(3)]
 
-        maximum_intensity = np.max(peak_intensities)
+        maximum_intensity = np.max(data)
         for i in range(3):
             fig.add_trace(
                 go.Scatter(
                     x=self.timestamps,
-                    y=peak_intensities[i] / maximum_intensity,
+                    y=data[i] / maximum_intensity,
                     mode="lines",
                     name=labels[i],
                     line=dict(color=colors[i], width=2),
@@ -308,7 +322,7 @@ class RHEEDAnalyzer:
 
         fig.update_layout(
             xaxis_title="Time [s]",
-            yaxis_title="Peak Max Intensity [a.u.]",
+            yaxis_title="Peak Max Intensity",
             xaxis=dict(
                 showgrid=True,
                 showline=True,
@@ -327,6 +341,53 @@ class RHEEDAnalyzer:
         # Save as interactive HTML if needed
         if save:
             fig.write_html(str(self.outdir / "intensity_timeseries.html"))
+
+        fig.show(config={"displayModeBar": False})
+
+    def plot_sharpness_time_series(
+        self,
+        data: list[float],
+        figsize: tuple[int, int] = (12, 6),
+    ):
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
+
+        if not self.timestamps:
+            raise ValueError("No timestamps available")
+
+        fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
+
+        maximum_variance = np.max(data)
+        fig.add_trace(
+            go.Scatter(
+                x=self.timestamps,
+                y=data / maximum_variance,
+                mode="lines",
+                name="Laplacian Variance",
+                line=dict(color="blue", width=2),
+                hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>Laplacian Variance: %{y:.2f}",
+                customdata=np.arange(len(self.timestamps)),
+                hoverlabel=dict(namelength=0),
+            )
+        )
+
+        fig.update_layout(
+            xaxis_title="Time [s]",
+            yaxis_title="Laplacian Variance",
+            xaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            yaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=20, b=20),
+            template="plotly_white",
+        )
 
         fig.show(config={"displayModeBar": False})
 
