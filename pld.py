@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 import scipy.ndimage as ndi
 from numpy.typing import NDArray
+from scipy.fftpack import fft2, fftshift
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from skimage.feature import peak_local_max
@@ -24,32 +25,80 @@ MATRIX_COLORSCALE = [
 class RHEEDFrame:
     def __init__(
         self,
-        frame_index: int,
-        frame_data: FrameArray,
+        index: int,
+        data: FrameArray,
+        ROI_props: dict | None = None,
         outdir: Path | str = Path("."),
     ) -> None:
-        self.index = frame_index
-        self.data = frame_data
+        self.index = index
+        self.data = data
+
+        self.ROI_props = {
+            "min_distance": 18,
+            "width": 12,
+            "height": 50,
+        } | (ROI_props or {})
+
         self.outdir = Path(outdir).absolute()
-        self.ROIs = []
+
+        self._ROIs: list[list[int]] = []
+        self._peak_intensities: list[np.int64] = []
+        self._sharpness: float | None = None
+        self._power_spectrum: NDArray[np.signedinteger] = None
+        self._radial_profile: NDArray[np.float64] = None
 
     @property
     def dimensions(self) -> tuple[int, int]:
         return self.data.shape[:2]  # type: ignore
 
-    def smooth(self, sigma: int = 2):
-        data = ndi.gaussian_filter(self.data, sigma=sigma)
-        return RHEEDFrame(self.index, data, self.outdir)
+    @property
+    def ROIs(self) -> list[list[int]]:
+        if not self._ROIs:
+            self._ROIs = self.get_regions_of_interest()
+        return self._ROIs
+
+    @property
+    def peak_intensities(self) -> list[np.int64]:
+        if not self._peak_intensities:
+            self._peak_intensities = self.get_peak_intensities()
+        return self._peak_intensities
+
+    @property
+    def sharpness(self) -> float:
+        if self._sharpness is None:
+            self._sharpness = self.get_laplacian_variance()
+        return self._sharpness
+
+    @property
+    def power_spectrum(self) -> NDArray[np.signedinteger]:
+        if self._power_spectrum is None:
+            self._power_spectrum = self.get_power_spectrum()
+        return self._power_spectrum
+
+    @property
+    def radial_profile(self) -> NDArray[np.float64]:
+        if self._radial_profile is None:
+            self._radial_profile = self.get_radial_profile()
+        return self._radial_profile
+
+    def smooth(self, sigma: int = 2) -> "RHEEDFrame":
+        return RHEEDFrame(
+            index=self.index,
+            data=ndi.gaussian_filter(self.data, sigma=sigma),
+            outdir=self.outdir,
+        )
 
     # TODO using fix width/height - do we require more flexibility?
-    def define_regions_of_interest(
+    def get_regions_of_interest(
         self,
-        min_distance: int = 18,
-        width: int = 12,
-        height: int = 50,
+        min_distance: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         coordinates = self.get_peak_coordinates(min_distance)
-        self.ROIs = [
+        width = width or self.ROI_props["width"]
+        height = height or self.ROI_props["height"]
+        return [
             [
                 y - height // 2,
                 y + height // 2,
@@ -59,16 +108,17 @@ class RHEEDFrame:
             for y, x in coordinates
         ]
 
-    def get_peak_coordinates(self, min_distance: int = 15) -> list[tuple[int, int]]:
+    def get_peak_coordinates(
+        self,
+        min_distance: int | None = None,
+    ) -> list[tuple[int, int]]:
+        min_distance = min_distance or self.ROI_props["min_distance"]
         coordinates = peak_local_max(self.data, min_distance=min_distance)
         coordinates = sorted(coordinates, key=lambda c: c[1])  # by x coordinate
         image_center_x = self.data.shape[1] // 2
         return sorted(coordinates, key=lambda c: abs(c[1] - image_center_x))[:3]
 
     def get_peak_intensities(self) -> list[np.int64]:
-        if not self.ROIs:
-            print(self.index)
-            raise ValueError("No regions of interest (ROIs) defined")
         return [
             np.max(self.data[top:bottom, left:right])
             for top, bottom, left, right in self.ROIs
@@ -77,6 +127,42 @@ class RHEEDFrame:
     def get_laplacian_variance(self) -> float:
         laplacian = cv2.Laplacian(self.data, cv2.CV_64F)
         return laplacian.var()
+
+    def get_power_spectrum(self) -> NDArray[np.signedinteger]:
+        fft_result = fft2(self.data)
+        fft_shifted = fftshift(fft_result)
+        return np.abs(fft_shifted) ** 2
+
+    def get_radial_profile(self) -> NDArray[np.float64]:
+        h, w = self.power_spectrum.shape
+        y, x = np.indices((h, w))
+        center = (h // 2, w // 2)
+        r = np.sqrt((x - center[1]) ** 2 + (y - center[0]) ** 2)
+        r: np.int32 = r.astype(np.int32)
+        radial_mean = np.bincount(r.ravel(), weights=self.power_spectrum.ravel())
+        radial_count = np.bincount(r.ravel())
+        radial_profile = radial_mean / (radial_count + 1e-8)  # Avoid division by zero
+        return radial_profile
+
+    def plot_power_spectrum(
+        self,
+        colorscale: list[tuple[float, str]] | str = "rainbow",
+        figsize: tuple[int] = (4, 3),
+    ):
+        fig = go.Figure(
+            data=go.Heatmap(
+                z=np.log1p(self.power_spectrum),
+                colorscale=colorscale,
+            ),
+            layout=dict(width=figsize[0] * 100, height=figsize[1] * 100),
+        )
+        fig.update_layout(
+            xaxis_title="X",
+            yaxis_title="Y",
+            coloraxis_colorbar=dict(title="Log Power"),
+            margin=dict(l=0, r=0, t=0, b=0),
+        )
+        fig.show(config={"displayModeBar": False})
 
     def plot(
         self,
@@ -231,7 +317,11 @@ class RHEEDAnalyzer:
         if index >= self.frames.shape[0]:
             raise IndexError("Frame index out of range")
 
-        return RHEEDFrame(index, self.frames[index], self.outdir)
+        return RHEEDFrame(
+            index=index,
+            data=self.frames[index],
+            outdir=self.outdir,
+        )
 
     def set_outdir(self, outdir: Path | str = ".") -> None:
         self.outdir = Path(outdir).absolute()
@@ -267,32 +357,124 @@ class RHEEDAnalyzer:
     def get_peak_intensities(
         self,
         sigma: int = 0,
-        min_distance: int = 18,
+        ROI_min_distance: int = 18,
     ) -> list[list[np.int64]]:
         peak_intensities = [[] for _ in range(3)]
         for i, frame in enumerate(self.frames):
-            rheed_frame = RHEEDFrame(i, frame)
+            rheed_frame = RHEEDFrame(
+                index=i,
+                data=frame,
+                ROI_props={"min_distance": ROI_min_distance},
+            )
             if sigma:
                 rheed_frame = rheed_frame.smooth(sigma)
-            rheed_frame.define_regions_of_interest(min_distance)
-            intensities = rheed_frame.get_peak_intensities()
+            intensities = rheed_frame.peak_intensities
 
             for j in range(3):
                 intensity = intensities[j] if j < len(intensities) else None
                 peak_intensities[j].append(intensity)
         return peak_intensities
 
-    def get_laplacian_variances(self) -> list[float]:
+    def get_sharpness(self) -> list[float]:
         return [
-            RHEEDFrame(i, frame).get_laplacian_variance()
+            RHEEDFrame(
+                index=i,
+                data=frame,
+            ).sharpness
             for i, frame in enumerate(self.frames)
         ]
+
+    def get_radial_profile(self):
+        radial_profile = []
+        for frame in self.get_all_frames():
+            radial_profile.append(np.max(frame.radial_profile))
+        return radial_profile
+
+    def plot_sharpness_time_series(
+        self,
+        data: list[float],
+        figsize: tuple[int, int] = (12, 6),
+    ):
+        if self.frames.size == 0:
+            raise ValueError("No data loaded")
+
+        if not self.timestamps:
+            raise ValueError("No timestamps available")
+
+        fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
+
+        maximum_variance = np.max(data)
+        fig.add_trace(
+            go.Scatter(
+                x=self.timestamps,
+                y=data / maximum_variance,
+                mode="lines",
+                name="Sharpness",
+                hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>Laplacian Variance: %{y:.2f}",
+                customdata=np.arange(len(self.timestamps)),
+                hoverlabel=dict(namelength=0),
+            )
+        )
+
+        fig.update_layout(
+            xaxis_title="Time [s]",
+            yaxis_title="Sharpness",
+            xaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            yaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=20, b=20),
+            template="plotly_white",
+        )
+
+        fig.show(config={"displayModeBar": False})
+
+    def plot_radial_profile_time_series(
+        self,
+        data: list,
+        figsize: tuple[int] = (12, 6),
+    ):
+        fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
+
+        maximum = np.max(data)
+        fig.add_trace(
+            go.Scatter(
+                x=self.timestamps,
+                y=data / maximum,
+                mode="lines",
+                name="Radial Profile Max",
+            )
+        )
+        fig.update_layout(
+            xaxis_title="Time [s]",
+            yaxis_title="Peak Max Intensity",
+            xaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            yaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor="black",
+            ),
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=20, b=20),
+            template="plotly_white",
+        )
+        fig.show(config={"displayModeBar": False})
 
     def plot_intensity_time_series(
         self,
         data: list[list[np.int64]],
         figsize: tuple[int, int] = (12, 6),
-        save: bool = False,
     ) -> None:
         if self.frames.size == 0:
             raise ValueError("No data loaded")
@@ -338,58 +520,33 @@ class RHEEDAnalyzer:
             template="plotly_white",
         )
 
-        # Save as interactive HTML if needed
-        if save:
-            fig.write_html(str(self.outdir / "intensity_timeseries.html"))
-
         fig.show(config={"displayModeBar": False})
 
-    def plot_sharpness_time_series(
+    def compute_deposition_score(
         self,
-        data: list[float],
-        figsize: tuple[int, int] = (12, 6),
-    ):
-        if self.frames.size == 0:
-            raise ValueError("No data loaded")
+        start_time: int = 100,
+        end_time: int = 300,
+    ) -> np.float64 | None:
+        scores = []
+        start = int(start_time * 2)
+        end = int(end_time * 2)
+        for frame in self.get_all_frames()[start:end]:
+            if frame.sharpness > 0.8:
+                score = 1.0  # Spots
+            elif frame.radial_profile[1] > 0.6:
+                score = 0.83  # Streaks
+            elif frame.radial_profile[2] > 0.5:
+                score = 0.67  # Satellite Streaks
+            elif frame.radial_profile[3] > 0.4:
+                score = 0.5  # Modulated Streaks
+            elif frame.radial_profile[4] > 0.3:
+                score = 0.33  # Inclined Streaks
+            else:
+                score = 0.0  # Transmission Spots
 
-        if not self.timestamps:
-            raise ValueError("No timestamps available")
+            scores.append(score)
 
-        fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
-
-        maximum_variance = np.max(data)
-        fig.add_trace(
-            go.Scatter(
-                x=self.timestamps,
-                y=data / maximum_variance,
-                mode="lines",
-                name="Laplacian Variance",
-                line=dict(color="blue", width=2),
-                hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>Laplacian Variance: %{y:.2f}",
-                customdata=np.arange(len(self.timestamps)),
-                hoverlabel=dict(namelength=0),
-            )
-        )
-
-        fig.update_layout(
-            xaxis_title="Time [s]",
-            yaxis_title="Laplacian Variance",
-            xaxis=dict(
-                showgrid=True,
-                showline=True,
-                linecolor="black",
-            ),
-            yaxis=dict(
-                showgrid=True,
-                showline=True,
-                linecolor="black",
-            ),
-            plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=20, r=20, t=20, b=20),
-            template="plotly_white",
-        )
-
-        fig.show(config={"displayModeBar": False})
+        return np.mean(scores) if scores else None
 
     def compute_decay_rate(self, intensities: NDArray) -> float:
         def exp_decay(t, I0, lambda_):
@@ -424,14 +581,14 @@ class RHEEDAnalyzer:
     def get_all_frames(self) -> list[RHEEDFrame]:
         frames = []
         for i, data in enumerate(self.frames):
-            frame = RHEEDFrame(i, data, self.outdir)
-            frame.define_regions_of_interest()
+            frame = RHEEDFrame(index=i, data=data, outdir=self.outdir)
+            frame.get_regions_of_interest()
             frames.append(frame)
         return frames
 
     def analyze_quality(self, ROI_index: int) -> dict:
         intensities = np.array(
-            [frame.get_peak_intensities()[ROI_index] for frame in self.get_all_frames()]
+            [frame.peak_intensities[ROI_index] for frame in self.get_all_frames()]
         )
         return {
             "decay_rate": self.compute_decay_rate(intensities),
