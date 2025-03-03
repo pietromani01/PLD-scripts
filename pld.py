@@ -88,6 +88,20 @@ class RHEEDFrame:
             outdir=self.outdir,
         )
 
+    def normalize(self) -> "RHEEDFrame":
+        normalized = cv2.normalize(
+            self.data,
+            None,
+            alpha=0,
+            beta=255,
+            norm_type=cv2.NORM_MINMAX,
+        ).astype(np.uint8)  # type: ignore
+        return RHEEDFrame(
+            index=self.index,
+            data=normalized,
+            outdir=self.outdir,
+        )
+
     # TODO using fix width/height - do we require more flexibility?
     def get_regions_of_interest(
         self,
@@ -146,7 +160,7 @@ class RHEEDFrame:
 
     def plot_power_spectrum(
         self,
-        colorscale: list[tuple[float, str]] | str = "rainbow",
+        colorscale: list[tuple[float, str]] | str = "cividis",
         figsize: tuple[int] = (4, 3),
     ):
         fig = go.Figure(
@@ -157,8 +171,8 @@ class RHEEDFrame:
             layout=dict(width=figsize[0] * 100, height=figsize[1] * 100),
         )
         fig.update_layout(
-            xaxis_title="X",
-            yaxis_title="Y",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
             coloraxis_colorbar=dict(title="Log Power"),
             margin=dict(l=0, r=0, t=0, b=0),
         )
@@ -184,7 +198,7 @@ class RHEEDFrame:
 
         # Add Regions of Interest (ROIs) if requested
         if show_regions_of_interest:
-            self.plot_regions_of_interest(fig)
+            self._plot_regions_of_interest(fig)
 
         fig.update_layout(
             xaxis=dict(visible=False),
@@ -199,7 +213,7 @@ class RHEEDFrame:
 
         fig.show(config={"displayModeBar": False})
 
-    def plot_regions_of_interest(self, fig: go.Figure):
+    def _plot_regions_of_interest(self, fig: go.Figure):
         if not self.ROIs:
             raise ValueError("No regions of interest (ROIs) defined")
         colors = ["blue", "red", "lime"]
@@ -222,7 +236,8 @@ class RHEEDFrame:
 
 
 class RHEEDAnalyzer:
-    frames: FrameArray = np.array([])
+    data: NDArray = np.array([])
+    frames: list[RHEEDFrame] = []
     timestamps: list[datetime] = []
     outdir = Path(".")
 
@@ -239,10 +254,10 @@ class RHEEDAnalyzer:
 
     def load_single_data_file(self, data_path: Path):
         if data_path.suffix == ".npy":
-            self.frames = np.load(data_path)
+            self.data = np.load(data_path)
             self.timestamps.append(self.extract_timestamp(data_path))
-            if self.frames.ndim == 2:
-                self.frames = self.frames[np.newaxis, ...]
+            if self.data.ndim == 2:
+                self.data = self.data[np.newaxis, ...]
         else:
             raise ValueError("Unsupported file format")
 
@@ -257,7 +272,7 @@ class RHEEDAnalyzer:
             frames.append(np.load(data_file))
             timestamps.append(self.extract_timestamp(data_file) - timestamp_0)
         self.timestamps = timestamps
-        self.frames = np.stack(frames, axis=0)
+        self.data = np.stack(frames, axis=0)
 
     def extract_timestamp(self, data_path: Path) -> float:
         return datetime.strptime(
@@ -265,38 +280,14 @@ class RHEEDAnalyzer:
             r"%Y%m%d_%H%M%S%f",
         ).timestamp()
 
-    def crop_to_global_region_of_interest(
-        self,
-        threshold: float = 0.8,
-        margins: tuple[int, int] | tuple[int, int, int, int] = (40, 40, -20, 40),
-    ) -> None:
-        ROI = self.extract_global_region_of_interest(threshold)
-        if len(margins) == 2:
-            mx, my = margins
-            ROI = [
-                max(0, ROI[0] - mx),
-                min(self.frames.shape[2], ROI[1] + mx),
-                max(0, ROI[2] - my),
-                min(self.frames.shape[1], ROI[3] + my),
-            ]
-        else:
-            mt, mr, mb, ml = margins
-            ROI = [
-                max(0, ROI[0] - ml),
-                min(self.frames.shape[2], ROI[1] + mr),
-                max(0, ROI[2] - mt),
-                min(self.frames.shape[1], ROI[3] + mb),
-            ]
-        self.frames = self.frames[:, ROI[2] : ROI[3], ROI[0] : ROI[1]]
-
     def extract_global_region_of_interest(
         self,
         threshold: float = 0.8,
     ) -> list[np.intp]:
-        if self.frames.size == 0:
+        if self.data.size == 0:
             raise ValueError("No data loaded")
 
-        first_frame = self.frames[0]
+        first_frame = self.data[0]
         max_intensity = np.max(first_frame)
         mask = first_frame >= threshold * max_intensity
 
@@ -310,28 +301,45 @@ class RHEEDAnalyzer:
 
         return [x_min, x_max, y_min, y_max]
 
-    def get_frame(self, index: int) -> RHEEDFrame:
-        if self.frames.size == 0:
-            raise ValueError("No data loaded")
+    def crop_to_global_region_of_interest(
+        self,
+        threshold: float = 0.8,
+        margins: tuple[int, int] | tuple[int, int, int, int] = (40, 40, -20, 40),
+    ) -> None:
+        ROI = self.extract_global_region_of_interest(threshold)
+        if len(margins) == 2:
+            mx, my = margins
+            ROI = [
+                max(0, ROI[0] - mx),
+                min(self.data.shape[2], ROI[1] + mx),
+                max(0, ROI[2] - my),
+                min(self.data.shape[1], ROI[3] + my),
+            ]
+        else:
+            mt, mr, mb, ml = margins
+            ROI = [
+                max(0, ROI[0] - ml),
+                min(self.data.shape[2], ROI[1] + mr),
+                max(0, ROI[2] - mt),
+                min(self.data.shape[1], ROI[3] + mb),
+            ]
+        self.data = self.data[:, ROI[2] : ROI[3], ROI[0] : ROI[1]]
 
-        if index >= self.frames.shape[0]:
-            raise IndexError("Frame index out of range")
-
-        return RHEEDFrame(
-            index=index,
-            data=self.frames[index],
-            outdir=self.outdir,
-        )
+    def generate_frames(self) -> None:
+        self.frames = [
+            RHEEDFrame(index=i, data=data, outdir=self.outdir)
+            for i, data in enumerate(self.data)
+        ]
 
     def set_outdir(self, outdir: Path | str = ".") -> None:
         self.outdir = Path(outdir).absolute()
         self.outdir.mkdir(parents=True, exist_ok=True)
 
     def make_video(self, fps: int = 2) -> None:
-        if self.frames.size == 0:
+        if self.data.size == 0:
             raise ValueError("No data loaded")
 
-        height, width = self.frames.shape[1:]
+        height, width = self.data.shape[1:]
 
         fourcc = cv2.VideoWriter.fourcc(*"mp4v")
         video_writer = cv2.VideoWriter(
@@ -342,60 +350,33 @@ class RHEEDAnalyzer:
         )
 
         for frame in self.frames:
-            frame = cv2.normalize(
-                frame,
-                None,
-                alpha=0,
-                beta=255,
-                norm_type=cv2.NORM_MINMAX,
-            ).astype(np.uint8)  # type: ignore
-            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            frame = cv2.cvtColor(frame.normalize().data, cv2.COLOR_GRAY2BGR)
             video_writer.write(frame)
 
         video_writer.release()
 
-    def get_peak_intensities(
-        self,
-        sigma: int = 0,
-        ROI_min_distance: int = 18,
-    ) -> list[list[np.int64]]:
+    def get_peak_intensities(self, sigma: int = 0) -> list[list[np.int64]]:
         peak_intensities = [[] for _ in range(3)]
         for i, frame in enumerate(self.frames):
-            rheed_frame = RHEEDFrame(
-                index=i,
-                data=frame,
-                ROI_props={"min_distance": ROI_min_distance},
-            )
-            if sigma:
-                rheed_frame = rheed_frame.smooth(sigma)
+            rheed_frame = frame.smooth(sigma) if sigma else frame
             intensities = rheed_frame.peak_intensities
-
             for j in range(3):
                 intensity = intensities[j] if j < len(intensities) else None
                 peak_intensities[j].append(intensity)
         return peak_intensities
 
     def get_sharpness(self) -> list[float]:
-        return [
-            RHEEDFrame(
-                index=i,
-                data=frame,
-            ).sharpness
-            for i, frame in enumerate(self.frames)
-        ]
+        return [frame.sharpness for frame in self.frames]
 
     def get_radial_profile(self):
-        radial_profile = []
-        for frame in self.get_all_frames():
-            radial_profile.append(np.max(frame.radial_profile))
-        return radial_profile
+        return [frame.radial_profile.max() for frame in self.frames]
 
     def plot_sharpness_time_series(
         self,
         data: list[float],
         figsize: tuple[int, int] = (12, 6),
     ):
-        if self.frames.size == 0:
+        if self.data.size == 0:
             raise ValueError("No data loaded")
 
         if not self.timestamps:
@@ -476,7 +457,7 @@ class RHEEDAnalyzer:
         data: list[list[np.int64]],
         figsize: tuple[int, int] = (12, 6),
     ) -> None:
-        if self.frames.size == 0:
+        if self.data.size == 0:
             raise ValueError("No data loaded")
 
         if not self.timestamps:
@@ -530,7 +511,7 @@ class RHEEDAnalyzer:
         scores = []
         start = int(start_time * 2)
         end = int(end_time * 2)
-        for frame in self.get_all_frames()[start:end]:
+        for frame in self.frames[start:end]:
             if frame.sharpness > 0.8:
                 score = 1.0  # Spots
             elif frame.radial_profile[1] > 0.6:
@@ -578,18 +559,9 @@ class RHEEDAnalyzer:
         # Oscillation score: sum of differences weighted by count
         return np.sum(peak_to_valley_diffs) * len(peaks)
 
-    def get_all_frames(self) -> list[RHEEDFrame]:
-        frames = []
-        for i, data in enumerate(self.frames):
-            frame = RHEEDFrame(index=i, data=data, outdir=self.outdir)
-            frame.get_regions_of_interest()
-            frames.append(frame)
-        return frames
-
     def analyze_quality(self, ROI_index: int) -> dict:
-        intensities = np.array(
-            [frame.peak_intensities[ROI_index] for frame in self.get_all_frames()]
-        )
+        intensities = [frame.peak_intensities[ROI_index] for frame in self.frames]
+        intensities = np.array(intensities)
         return {
             "decay_rate": self.compute_decay_rate(intensities),
             "oscillation_score": self.compute_oscillation_score(intensities),
