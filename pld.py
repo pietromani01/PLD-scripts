@@ -11,7 +11,8 @@ from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from skimage.feature import peak_local_max
 
-FrameArray = NDArray[np.int64]
+IntArray = NDArray[np.int64]
+FloatArray = NDArray[np.float64]
 
 MATRIX_COLORSCALE = [
     (0.00, "#000000"),  # Black
@@ -26,12 +27,13 @@ class RHEEDFrame:
     def __init__(
         self,
         index: int,
-        data: FrameArray,
+        data: IntArray,
         ROI_props: dict | None = None,
+        sigma: int = 0,
         outdir: Path | str = Path("."),
     ) -> None:
         self.index = index
-        self.data = data
+        self.data = self._smoothen_data(data, sigma).astype(np.int64) if sigma else data
 
         self.ROI_props = {
             "min_distance": 18,
@@ -44,8 +46,8 @@ class RHEEDFrame:
         self._ROIs: list[list[int]] = []
         self._peak_intensities: list[np.int64] = []
         self._sharpness: float | None = None
-        self._power_spectrum: NDArray[np.signedinteger] = None
-        self._radial_profile: NDArray[np.float64] = None
+        self._power_spectrum: IntArray = None
+        self._radial_profile: FloatArray = None
 
     @property
     def dimensions(self) -> tuple[int, int]:
@@ -70,13 +72,13 @@ class RHEEDFrame:
         return self._sharpness
 
     @property
-    def power_spectrum(self) -> NDArray[np.signedinteger]:
+    def power_spectrum(self) -> IntArray:
         if self._power_spectrum is None:
             self._power_spectrum = self.get_power_spectrum()
         return self._power_spectrum
 
     @property
-    def radial_profile(self) -> NDArray[np.float64]:
+    def radial_profile(self) -> FloatArray:
         if self._radial_profile is None:
             self._radial_profile = self.get_radial_profile()
         return self._radial_profile
@@ -84,9 +86,12 @@ class RHEEDFrame:
     def smooth(self, sigma: int = 2) -> "RHEEDFrame":
         return RHEEDFrame(
             index=self.index,
-            data=ndi.gaussian_filter(self.data, sigma=sigma),
+            data=self._smoothen_data(self.data, sigma),
             outdir=self.outdir,
         )
+
+    def _smoothen_data(self, data: IntArray, sigma: int):
+        return ndi.gaussian_filter(data, sigma=sigma)
 
     def normalize(self) -> "RHEEDFrame":
         normalized = cv2.normalize(
@@ -132,7 +137,7 @@ class RHEEDFrame:
         image_center_x = self.data.shape[1] // 2
         return sorted(coordinates, key=lambda c: abs(c[1] - image_center_x))[:3]
 
-    def get_peak_intensities(self) -> list[np.int64]:
+    def get_peak_intensities(self):
         return [
             np.max(self.data[top:bottom, left:right])
             for top, bottom, left, right in self.ROIs
@@ -142,17 +147,17 @@ class RHEEDFrame:
         laplacian = cv2.Laplacian(self.data, cv2.CV_64F)
         return laplacian.var()
 
-    def get_power_spectrum(self) -> NDArray[np.signedinteger]:
+    def get_power_spectrum(self) -> IntArray:
         fft_result = fft2(self.data)
         fft_shifted = fftshift(fft_result)
         return np.abs(fft_shifted) ** 2
 
-    def get_radial_profile(self) -> NDArray[np.float64]:
+    def get_radial_profile(self) -> FloatArray:
         h, w = self.power_spectrum.shape
         y, x = np.indices((h, w))
         center = (h // 2, w // 2)
         r = np.sqrt((x - center[1]) ** 2 + (y - center[0]) ** 2)
-        r: np.int32 = r.astype(np.int32)
+        r: np.int64 = r.astype(np.int64)
         radial_mean = np.bincount(r.ravel(), weights=self.power_spectrum.ravel())
         radial_count = np.bincount(r.ravel())
         radial_profile = radial_mean / (radial_count + 1e-8)  # Avoid division by zero
@@ -236,7 +241,7 @@ class RHEEDFrame:
 
 
 class RHEEDAnalyzer:
-    data: NDArray = np.array([])
+    data: IntArray = np.array([])
     frames: list[RHEEDFrame] = []
     timestamps: list[datetime] = []
     outdir = Path(".")
@@ -325,9 +330,9 @@ class RHEEDAnalyzer:
             ]
         self.data = self.data[:, ROI[2] : ROI[3], ROI[0] : ROI[1]]
 
-    def generate_frames(self) -> None:
+    def generate_frames(self, sigma: int = 0) -> None:
         self.frames = [
-            RHEEDFrame(index=i, data=data, outdir=self.outdir)
+            RHEEDFrame(index=i, data=data, sigma=sigma, outdir=self.outdir)
             for i, data in enumerate(self.data)
         ]
 
@@ -350,7 +355,7 @@ class RHEEDAnalyzer:
         )
 
         for frame in self.frames:
-            frame = cv2.cvtColor(frame.normalize().data, cv2.COLOR_GRAY2BGR)
+            frame = cv2.cvtColor(frame.normalize().data, cv2.COLOR_GRAY2BGR)  # type: ignore
             video_writer.write(frame)
 
         video_writer.release()
@@ -550,12 +555,12 @@ class RHEEDAnalyzer:
 
         return np.mean(scores) if scores else None
 
-    def compute_decay_rate(self, intensities: NDArray) -> float:
+    def compute_decay_rate(self, intensities: IntArray) -> float:
         def exp_decay(t, I0, lambda_):
             return I0 * np.exp(-lambda_ * t)
 
         try:
-            popt, _ = curve_fit(
+            popt, _ = curve_fit(  # type: ignore
                 exp_decay, self.timestamps, intensities, p0=(intensities[0], 0.01)
             )
             return popt[1]  # lambda_
@@ -563,7 +568,7 @@ class RHEEDAnalyzer:
             print("Curve fitting failed; returning NaN")
             return np.nan
 
-    def compute_oscillation_score(self, intensities: NDArray) -> float:
+    def compute_oscillation_score(self, intensities: IntArray) -> float:
         # Find peaks and valleys
         peaks, _ = find_peaks(intensities)
         valleys, _ = find_peaks(-intensities)
