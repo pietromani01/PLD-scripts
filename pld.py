@@ -22,36 +22,52 @@ MATRIX_COLORSCALE = [
     (1.00, "#32FF00"),  # Neon lime green
 ]
 
+DIFFRACTION_BOTTOM_EDGE = 80  # pixels
+
 
 class RHEEDFrame:
     def __init__(
         self,
         index: int,
         data: IntArray,
-        ROI_props: dict | None = None,
         sigma: int = 0,
+        params: dict | None = None,
         outdir: Path | str = Path("."),
     ) -> None:
         self.index = index
-        self.data = self._smoothen_data(data, sigma).astype(np.int64) if sigma else data
+        normalized = data / np.max(data)
+        self.data = (
+            self._smoothen_data(normalized, sigma).astype(np.float64)
+            if sigma
+            else normalized
+        )
 
-        self.ROI_props = {
+        self.params = {
             "min_distance": 18,
+            "threshold_rel": 0.5,
             "width": 12,
             "height": 50,
-        } | (ROI_props or {})
+        } | (params or {})
 
         self.outdir = Path(outdir).absolute()
 
+        self._peaks: list[tuple[int, int]] = []
         self._ROIs: list[list[int]] = []
         self._peak_intensities: list[np.int64] = []
         self._sharpness: float | None = None
         self._power_spectrum: IntArray = None
         self._radial_profile: FloatArray = None
+        self._mode: int = 0
 
     @property
     def dimensions(self) -> tuple[int, int]:
         return self.data.shape[:2]  # type: ignore
+
+    @property
+    def peaks(self) -> list[tuple[int, int]]:
+        if not self._peaks:
+            self._peaks = self.get_peak_coordinates()
+        return self._peaks
 
     @property
     def ROIs(self) -> list[list[int]]:
@@ -107,35 +123,40 @@ class RHEEDFrame:
             outdir=self.outdir,
         )
 
-    # TODO using fix width/height - do we require more flexibility?
-    def get_regions_of_interest(
-        self,
-        min_distance: int | None = None,
-        width: int | None = None,
-        height: int | None = None,
-    ):
-        coordinates = self.get_peak_coordinates(min_distance)
-        width = width or self.ROI_props["width"]
-        height = height or self.ROI_props["height"]
-        return [
-            [
-                y - height // 2,
-                y + height // 2,
-                x - width // 2,
-                x + width // 2,
-            ]
-            for y, x in coordinates
-        ]
-
     def get_peak_coordinates(
         self,
         min_distance: int | None = None,
+        threshold_rel: float = 0.0,
     ) -> list[tuple[int, int]]:
-        min_distance = min_distance or self.ROI_props["min_distance"]
-        coordinates = peak_local_max(self.data, min_distance=min_distance)
+        min_distance = min_distance or self.params["min_distance"]
+        threshold_rel = threshold_rel or self.params["threshold_rel"]
+        coordinates = peak_local_max(
+            self.data,
+            min_distance=min_distance,
+            threshold_rel=threshold_rel,
+        )
         coordinates = sorted(coordinates, key=lambda c: c[1])  # by x coordinate
+        return [(x, y) for y, x in coordinates]
+
+    # TODO using fix width/height - do we require more flexibility?
+    def get_regions_of_interest(
+        self,
+        width: int | None = None,
+        height: int | None = None,
+    ):
+        width = width or self.params["width"]
+        height = height or self.params["height"]
         image_center_x = self.data.shape[1] // 2
-        return sorted(coordinates, key=lambda c: abs(c[1] - image_center_x))[:3]
+        central_peaks = sorted(self.peaks, key=lambda c: abs(c[0] - image_center_x))[:3]
+        return [
+            [
+                max(y - height // 2, 0),
+                min(y + height // 2, DIFFRACTION_BOTTOM_EDGE),
+                x - width // 2,
+                x + width // 2,
+            ]
+            for x, y in central_peaks
+        ]
 
     def get_peak_intensities(self):
         return [
@@ -172,6 +193,8 @@ class RHEEDFrame:
             data=go.Heatmap(
                 z=np.log1p(self.power_spectrum),
                 colorscale=colorscale,
+                hovertemplate="x: %{x}<br>y: %{y}<br>z: %{z:.2f}",
+                hoverlabel=dict(namelength=0),
             ),
             layout=dict(width=figsize[0] * 100, height=figsize[1] * 100),
         )
@@ -187,21 +210,36 @@ class RHEEDFrame:
         self,
         figsize: tuple[int, int] = (8, 6),
         colorscale: list[tuple[float, str]] | str = MATRIX_COLORSCALE,
+        show_peaks: bool = False,
         show_regions_of_interest: bool = False,
         save: bool = False,
     ):
         fig = go.Figure(layout=dict(width=figsize[0] * 100, height=figsize[1] * 100))
 
-        # Add heatmap of data
         fig.add_trace(
             go.Heatmap(
                 z=self.data,
                 colorscale=colorscale,
                 showscale=False,
+                hovertemplate="x: %{x}<br>y: %{y}<br>z: %{z:.2f}",
+                hoverlabel=dict(namelength=0),
             )
         )
 
-        # Add Regions of Interest (ROIs) if requested
+        if show_peaks:
+            fig.add_trace(
+                go.Scatter(
+                    x=[x for x, _ in self.peaks],
+                    y=[y for _, y in self.peaks],
+                    mode="markers",
+                    marker=dict(size=10, color="red", symbol="x"),
+                    hovertemplate="x: %{x}<br>y: %{y}<br>z: %{customdata:.2f}",
+                    customdata=[self.data[y, x] for x, y in self.peaks],
+                    hoverlabel=dict(namelength=0),
+                    showlegend=False,
+                )
+            )
+
         if show_regions_of_interest:
             self._plot_regions_of_interest(fig)
 
@@ -219,8 +257,6 @@ class RHEEDFrame:
         fig.show(config={"displayModeBar": False})
 
     def _plot_regions_of_interest(self, fig: go.Figure):
-        if not self.ROIs:
-            raise ValueError("No regions of interest (ROIs) defined")
         colors = ["blue", "red", "lime"]
         for i, (top, bottom, left, right) in enumerate(self.ROIs):
             fig.add_shape(
@@ -330,9 +366,15 @@ class RHEEDAnalyzer:
             ]
         self.data = self.data[:, ROI[2] : ROI[3], ROI[0] : ROI[1]]
 
-    def generate_frames(self, sigma: int = 0) -> None:
+    def generate_frames(self, sigma: int = 0, params: dict | None = None) -> None:
         self.frames = [
-            RHEEDFrame(index=i, data=data, sigma=sigma, outdir=self.outdir)
+            RHEEDFrame(
+                index=i,
+                data=data,
+                sigma=sigma,
+                params=params,
+                outdir=self.outdir,
+            )
             for i, data in enumerate(self.data)
         ]
 
@@ -360,9 +402,9 @@ class RHEEDAnalyzer:
 
         video_writer.release()
 
-    def get_peak_intensities(self, sigma: int = 0) -> list[list[np.int64]]:
+    def get_peak_intensities(self, sigma: int = 0) -> list[list[np.float64]]:
         peak_intensities = [[] for _ in range(3)]
-        for i, frame in enumerate(self.frames):
+        for frame in self.frames:
             rheed_frame = frame.smooth(sigma) if sigma else frame
             intensities = rheed_frame.peak_intensities
             for j in range(3):
@@ -474,7 +516,7 @@ class RHEEDAnalyzer:
 
     def plot_intensity_time_series(
         self,
-        data: list[list[np.int64]],
+        data: list[list[np.float64]],
         figsize: tuple[int, int] = (12, 6),
     ) -> None:
         if self.data.size == 0:
@@ -488,12 +530,11 @@ class RHEEDAnalyzer:
         colors = ["blue", "red", "lime"]
         labels = [f"Peak {i + 1}" for i in range(3)]
 
-        maximum_intensity = np.max(data)
         for i in range(3):
             fig.add_trace(
                 go.Scatter(
                     x=self.timestamps,
-                    y=data[i] / maximum_intensity,
+                    y=data[i],
                     mode="lines",
                     name=labels[i],
                     line=dict(color=colors[i], width=2),
@@ -537,16 +578,20 @@ class RHEEDAnalyzer:
         scores = []
         start = int(start_time * 2)
         end = int(end_time * 2)
+        max_sharpness = np.max(self.get_sharpness())
+        max_radial_profile = np.max(self.get_radial_profile())
         for frame in self.frames[start:end]:
-            if frame.sharpness > 0.8:
+            sharpness = frame.sharpness / max_sharpness
+            radial_profile = frame.radial_profile / max_radial_profile
+            if sharpness / max_sharpness > 0.8:
                 score = 1.0  # Spots
-            elif frame.radial_profile[1] > 0.6:
+            elif radial_profile[1] > 0.6:
                 score = 0.83  # Streaks
-            elif frame.radial_profile[2] > 0.5:
+            elif radial_profile[2] > 0.5:
                 score = 0.67  # Satellite Streaks
-            elif frame.radial_profile[3] > 0.4:
+            elif radial_profile[3] > 0.4:
                 score = 0.5  # Modulated Streaks
-            elif frame.radial_profile[4] > 0.3:
+            elif radial_profile[4] > 0.3:
                 score = 0.33  # Inclined Streaks
             else:
                 score = 0.0  # Transmission Spots
