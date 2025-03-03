@@ -391,7 +391,7 @@ class RHEEDAnalyzer:
                 y=data / maximum_variance,
                 mode="lines",
                 name="Sharpness",
-                hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>Laplacian Variance: %{y:.2f}",
+                hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>sharpness: %{y:.2f}",
                 customdata=np.arange(len(self.timestamps)),
                 hoverlabel=dict(namelength=0),
             )
@@ -413,6 +413,12 @@ class RHEEDAnalyzer:
             plot_bgcolor="rgba(0,0,0,0)",
             margin=dict(l=20, r=20, t=20, b=20),
             template="plotly_white",
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                xanchor="right",
+                x=1,
+            ),
         )
 
         fig.show(config={"displayModeBar": False})
@@ -430,12 +436,15 @@ class RHEEDAnalyzer:
                 x=self.timestamps,
                 y=data / maximum,
                 mode="lines",
-                name="Radial Profile Max",
+                name="Radial profile",
+                hovertemplate="Frame: %{customdata}<br>Time: %{x:.1f}s<br>Radial profile: %{y:.2f}",
+                customdata=np.arange(len(self.timestamps)),
+                hoverlabel=dict(namelength=0),
             )
         )
         fig.update_layout(
             xaxis_title="Time [s]",
-            yaxis_title="Peak Max Intensity",
+            yaxis_title="Peak max intensity",
             xaxis=dict(
                 showgrid=True,
                 showline=True,
@@ -449,6 +458,12 @@ class RHEEDAnalyzer:
             plot_bgcolor="rgba(0,0,0,0)",
             margin=dict(l=20, r=20, t=20, b=20),
             template="plotly_white",
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                xanchor="right",
+                x=1,
+            ),
         )
         fig.show(config={"displayModeBar": False})
 
@@ -485,7 +500,7 @@ class RHEEDAnalyzer:
 
         fig.update_layout(
             xaxis_title="Time [s]",
-            yaxis_title="Peak Max Intensity",
+            yaxis_title="Peak max intensity",
             xaxis=dict(
                 showgrid=True,
                 showline=True,
@@ -499,6 +514,12 @@ class RHEEDAnalyzer:
             plot_bgcolor="rgba(0,0,0,0)",
             margin=dict(l=20, r=20, t=20, b=20),
             template="plotly_white",
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                xanchor="right",
+                x=1,
+            ),
         )
 
         fig.show(config={"displayModeBar": False})
