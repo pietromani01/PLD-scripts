@@ -24,6 +24,8 @@ MATRIX_COLORSCALE = [
 
 DIFFRACTION_BOTTOM_EDGE = 80  # pixels
 
+LATTICE_PARAMETER = 20
+
 
 class RHEEDFrame:
     def __init__(
@@ -146,8 +148,7 @@ class RHEEDFrame:
     ):
         width = width or self.params["width"]
         height = height or self.params["height"]
-        image_center_x = self.data.shape[1] // 2
-        central_peaks = sorted(self.peaks, key=lambda c: abs(c[0] - image_center_x))[:3]
+        central_peaks = self.get_central_peaks()
         return [
             [
                 max(y - height // 2, 0),
@@ -157,6 +158,28 @@ class RHEEDFrame:
             ]
             for x, y in central_peaks
         ]
+
+    def get_central_peaks(self):
+        center_x = self.data.shape[1] // 2
+        peaks = [[], [], []]  # left, center, right
+        for x, y in self.peaks:
+            if abs(x - center_x) < LATTICE_PARAMETER:
+                peaks[1].append((x, y))
+            elif x < center_x - LATTICE_PARAMETER:
+                peaks[0].append((x, y))
+            elif x > center_x + LATTICE_PARAMETER:
+                peaks[2].append((x, y))
+        return sorted(
+            [
+                max(
+                    peaks[i],
+                    key=lambda p: self.data[p[1], p[0]],
+                    default=(0, 0),
+                )  # type: ignore
+                for i in range(3)
+            ],
+            key=lambda c: abs(c[0] - center_x),
+        )
 
     def get_peak_intensities(self):
         return [
