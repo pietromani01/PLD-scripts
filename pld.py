@@ -578,20 +578,16 @@ class RHEEDAnalyzer:
         scores = []
         start = int(start_time * 2)
         end = int(end_time * 2)
-        max_sharpness = np.max(self.get_sharpness())
-        max_radial_profile = np.max(self.get_radial_profile())
         for frame in self.frames[start:end]:
-            sharpness = frame.sharpness / max_sharpness
-            radial_profile = frame.radial_profile / max_radial_profile
-            if sharpness / max_sharpness > 0.8:
+            if frame.sharpness > 0.8:
                 score = 1.0  # Spots
-            elif radial_profile[1] > 0.6:
+            elif frame.radial_profile[1] > 0.6:
                 score = 0.83  # Streaks
-            elif radial_profile[2] > 0.5:
+            elif frame.radial_profile[2] > 0.5:
                 score = 0.67  # Satellite Streaks
-            elif radial_profile[3] > 0.4:
+            elif frame.radial_profile[3] > 0.4:
                 score = 0.5  # Modulated Streaks
-            elif radial_profile[4] > 0.3:
+            elif frame.radial_profile[4] > 0.3:
                 score = 0.33  # Inclined Streaks
             else:
                 score = 0.0  # Transmission Spots
