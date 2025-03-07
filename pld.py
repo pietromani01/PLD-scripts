@@ -22,7 +22,7 @@ MATRIX_COLORSCALE = [
     (1.00, "#32FF00"),  # Neon lime green
 ]
 
-DIFFRACTION_BOTTOM_EDGE = 80  # pixels
+DIFFRACTION_BOTTOM_EDGE = 75  # pixels
 
 LATTICE_PARAMETER = 20
 
@@ -64,6 +64,10 @@ class RHEEDFrame:
     @property
     def dimensions(self) -> tuple[int, int]:
         return self.data.shape[:2]  # type: ignore
+
+    @property
+    def center(self) -> tuple[int, int]:
+        return self.data.shape[1] // 2, self.data.shape[0] // 2
 
     @property
     def peaks(self) -> list[tuple[int, int]]:
@@ -156,11 +160,11 @@ class RHEEDFrame:
                 x - width // 2,
                 x + width // 2,
             ]
-            for x, y in central_peaks
+            for x, y in sorted(central_peaks, key=lambda c: abs(c[0] - self.center[0]))
         ]
 
     def get_central_peaks(self):
-        center_x = self.data.shape[1] // 2
+        center_x = self.center[0]
         peaks = [[], [], []]  # left, center, right
         for x, y in self.peaks:
             if abs(x - center_x) < LATTICE_PARAMETER:
@@ -169,17 +173,28 @@ class RHEEDFrame:
                 peaks[0].append((x, y))
             elif x > center_x + LATTICE_PARAMETER:
                 peaks[2].append((x, y))
-        return sorted(
-            [
-                max(
-                    peaks[i],
-                    key=lambda p: self.data[p[1], p[0]],
-                    default=(0, 0),
-                )  # type: ignore
-                for i in range(3)
-            ],
-            key=lambda c: abs(c[0] - center_x),
-        )
+        return [
+            max(
+                peaks[i],
+                key=lambda p: self.data[p[1], p[0]],
+                default=(0, 0),
+            )  # type: ignore
+            for i in range(3)
+        ]
+
+    def get_center_peak_cross_section(self):
+        center_x = self.center[0]
+        w = self.params["width"] // 2
+        return self.data[
+            :DIFFRACTION_BOTTOM_EDGE,
+            center_x - w : center_x + w,
+        ].sum(axis=1)
+
+    def get_peak_ratio_sum(self):
+        cross_section = self.get_center_peak_cross_section()
+        peaks, _ = find_peaks(cross_section, distance=LATTICE_PARAMETER // 2)
+        peak0 = sorted(peaks, key=lambda peak: abs(peak - self.center[1]))[0]
+        return sum(cross_section[peak] for peak in peaks) / cross_section[peak0] - 1
 
     def get_peak_intensities(self):
         return [
