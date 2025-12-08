@@ -37,7 +37,7 @@ class RHEEDFrame:
         outdir: Path | str = Path("."),
     ) -> None:
         self.index = index
-        normalized = data / np.max(data)
+        normalized = data  # / np.max(data)
         self.data = (
             self._smoothen_data(normalized, sigma).astype(np.float64)
             if sigma
@@ -190,9 +190,13 @@ class RHEEDFrame:
             center_x - w : center_x + w,
         ].sum(axis=1)
 
-    def get_peak_ratio_sum(self):
+    def get_peak_ratio_sum(
+        self,
+        distance: int = LATTICE_PARAMETER // 2,
+        prominence: float = 1.0,
+    ) -> float:
         cross_section = self.get_center_peak_cross_section()
-        peaks, _ = find_peaks(cross_section, distance=LATTICE_PARAMETER // 2)
+        peaks, _ = find_peaks(cross_section, distance=distance, prominence=prominence)
         peak0 = sorted(peaks, key=lambda peak: abs(peak - self.center[1]))[0]
         return sum(cross_section[peak] for peak in peaks) / cross_section[peak0] - 1
 
