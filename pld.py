@@ -28,6 +28,7 @@ LATTICE_PARAMETER = 20
 
 
 class RHEEDFrame:
+    """Rappresenta un singolo frame RHEED con metodi per l'analisi e la visualizzazione."""
     def __init__(
         self,
         index: int,
@@ -36,6 +37,15 @@ class RHEEDFrame:
         params: dict | None = None,
         outdir: Path | str = Path("."),
     ) -> None:
+        """Inizializza un frame RHEED con dati e parametri.
+        
+        Args:
+            index: Numero/ID del frame
+            data: Array numpy 2D con i dati dell'immagine
+            sigma: Valore di smussatura gaussiana (0 = nessuno)
+            params: Parametri personalizzati per l'analisi
+            outdir: Cartella di output per salvare risultati
+        """
         self.index = index
         normalized = data  # / np.max(data)
         self.data = (
