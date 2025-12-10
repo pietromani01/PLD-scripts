@@ -58,7 +58,7 @@ class RHEEDFrame:
             "min_distance": 18,
             "threshold_rel": 0.5,
             "width": 12,
-            "height": 55,
+            "height": 60,
         } | (params or {})
 
         self.outdir = Path(outdir).absolute()
@@ -566,7 +566,7 @@ class RHEEDAnalyzer:
     def integrate_and_normalize_ROIs(
         self,
         bg_method="annulus",
-        annulus_pad=3,
+        annulus_pad=2,
         normalize="area",
         exposure_times=None,
         monitor_signal=None,
