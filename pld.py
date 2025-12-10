@@ -58,7 +58,7 @@ class RHEEDFrame:
             "min_distance": 18,
             "threshold_rel": 0.5,
             "width": 12,
-            "height": 50,
+            "height": 55,
         } | (params or {})
 
         self.outdir = Path(outdir).absolute()
@@ -154,24 +154,75 @@ class RHEEDFrame:
         coordinates = sorted(coordinates, key=lambda c: c[1])  # by x coordinate
         return [(x, y) for y, x in coordinates]
 
-    # TODO using fix width/height - do we require more flexibility?
+    def get_roi_center(self, x: int, y: int, width: int, height: int) -> tuple[int, int]:
+        """Trova il centro della ROI considerando i picchi locali all'interno.
+        
+        Se ci sono 2 picchi vicini nella ROI, ritorna il centro tra i due.
+        Altrimenti ritorna il punto originale.
+        """
+        # Estrai la regione candidata
+        left = max(x - width // 2, 0)
+        right = min(x + width // 2, self.data.shape[1])
+        top = max(y - height // 2, 0)
+        bottom = min(y + height // 2, DIFFRACTION_BOTTOM_EDGE)
+        
+        # Trova i picchi locali dentro questa regione con parametri sensibili
+        roi_data = self.data[top:bottom, left:right]
+        local_peaks = peak_local_max(
+            roi_data,
+            min_distance=2,
+            threshold_rel=0.1,
+        )
+        
+        # Converti coordinate relative a coordinate globali
+        local_peaks_global = [(left + px, top + py) for py, px in local_peaks]
+        
+        # Se ci sono 2 o più picchi, usa il centro tra i due più alti
+        if len(local_peaks_global) >= 2:
+            # Prendi i due picchi più alti (maggiore intensità)
+            peak_intensities = [(px, py, self.data[py, px]) for px, py in local_peaks_global]
+            peak_intensities.sort(key=lambda p: p[2], reverse=True)
+            
+            x1, y1 = peak_intensities[0][:2]
+            x2, y2 = peak_intensities[1][:2]
+            
+            # Ritorna il centro tra i due picchi
+            return ((x1 + x2) // 2, (y1 + y2) // 2)
+        
+        # Altrimenti ritorna il punto originale
+        return (x, y)
+
     def get_regions_of_interest(
         self,
         width: int | None = None,
         height: int | None = None,
+        auto_center: bool = True,
     ):
+        """Estrae le regioni di interesse attorno ai 3 picchi centrali.
+        
+        Args:
+            width: Larghezza della ROI
+            height: Altezza della ROI
+            auto_center: Se True, centra la ROI tra 2 picchi se presenti
+        """
         width = width or self.params["width"]
         height = height or self.params["height"]
         central_peaks = self.get_central_peaks()
-        return [
-            [
+        
+        rois = []
+        for x, y in sorted(central_peaks, key=lambda c: abs(c[0] - self.center[0])):
+            # Se auto_center è abilitato, trova il vero centro della ROI
+            if auto_center:
+                x, y = self.get_roi_center(x, y, width, height)
+            
+            rois.append([
                 max(y - height // 2, 0),
                 min(y + height // 2, DIFFRACTION_BOTTOM_EDGE),
                 x - width // 2,
                 x + width // 2,
-            ]
-            for x, y in sorted(central_peaks, key=lambda c: abs(c[0] - self.center[0]))
-        ]
+            ])
+        
+        return rois
 
     def get_central_peaks(self):
         center_x = self.center[0]
@@ -308,9 +359,14 @@ class RHEEDFrame:
 
         fig.show(config={"displayModeBar": False})
 
+
+
+
     def _plot_regions_of_interest(self, fig: go.Figure):
         colors = ["blue", "red", "lime"]
+        
         for i, (top, bottom, left, right) in enumerate(self.ROIs):
+            # Disegna il rettangolo della ROI
             fig.add_shape(
                 type="rect",
                 x0=left,
@@ -319,6 +375,22 @@ class RHEEDFrame:
                 y1=bottom,
                 line=dict(color=colors[i], width=2),
             )
+            
+            # Disegna il centro della ROI con un punto
+            center_x = (left + right) / 2
+            center_y = (top + bottom) / 2
+            fig.add_trace(
+                go.Scatter(
+                    x=[center_x],
+                    y=[center_y],
+                    mode="markers",
+                    marker=dict(size=8, color=colors[i], symbol="circle"),
+                    showlegend=False,
+                    hovertemplate=f"ROI {i+1} Center<br>x: %{{x}}<br>y: %{{y}}",
+                )
+            )
+            
+            # Etichetta della ROI
             fig.add_annotation(
                 x=(left + right) / 2,
                 y=top - 2,
@@ -326,7 +398,6 @@ class RHEEDFrame:
                 showarrow=False,
                 font=dict(size=12, color=colors[i]),
             )
-
 
 class RHEEDAnalyzer:
     data: IntArray = np.array([])
@@ -430,6 +501,180 @@ class RHEEDAnalyzer:
             for i, data in enumerate(self.data)
         ]
 
+    def get_bg_subtracted_ROIs(
+        self,
+        bg_method: str = "annulus",      
+        annulus_pad: int = 2,
+    ) -> list[list[np.ndarray]]:
+        """
+        Return all ROI arrays with background subtracted (but not integrated).
+
+        Output shape:
+            list of length n_frames,
+            each element is a list of n_rois arrays (each 2D).
+        """
+        if self.data.size == 0:
+            raise ValueError("No data loaded")
+
+        if not self.frames:
+            self.generate_frames()
+
+        all_frames = []   # list of list of ROI arrays per frame
+
+        for frame in self.frames:
+            frame_img = frame.data.astype(np.float64)
+            frame_rois = []
+
+            for (top, bottom, left, right) in frame.ROIs:
+                roi = frame_img[top:bottom, left:right]
+                h, w = roi.shape
+                pad = min(annulus_pad, h//2, w//2)
+
+                # ---- Background estimation ----
+                if bg_method == "linear":
+                    bg_plane = self.subtract_linear_background(roi, pad)
+                    roi_corr = roi - bg_plane
+
+                elif bg_method in ("annulus", "border"):
+                    if pad > 0:
+                        mask = np.zeros_like(roi, bool)
+                        mask[:pad*4, :] = True # multiplied times four for dealing with rectangular shape
+                        mask[-pad*4:, :] = True # multiplied times four for dealing with rectangular shape
+                        mask[:, :pad] = True
+                        mask[:, -pad:] = True
+                        bg = np.median(roi[mask])
+                    else:
+                        bg = np.median(roi)
+                    roi_corr = roi - bg
+
+                elif bg_method == "global":
+                    bg = np.median(frame_img)
+                    roi_corr = roi - bg
+
+                else:  # "none"
+                    roi_corr = roi.copy()
+
+                roi_corr[roi_corr < 0] = 0  # no negative intensities
+                frame_rois.append(roi_corr)
+
+            all_frames.append(frame_rois)
+
+        return all_frames
+
+
+
+    def integrate_and_normalize_ROIs(
+        self,
+        bg_method="annulus",
+        annulus_pad=3,
+        normalize="area",
+        exposure_times=None,
+        monitor_signal=None,
+        relative_ref="first"
+    ):
+        # 1) Get background–subtracted ROI images
+        bg_rois = self.get_bg_subtracted_ROIs(
+            bg_method=bg_method,
+            annulus_pad=annulus_pad
+        )
+
+        n_frames = len(bg_rois)
+        n_rois = len(bg_rois[0])
+
+        # 2) Integrate in one pass
+        integrated = np.zeros((n_frames, n_rois), float)
+        for i in range(n_frames):
+            for j in range(n_rois):
+                integrated[i, j] = bg_rois[i][j].sum()
+
+        # 3) Normalization
+        result = integrated.copy()
+
+        if normalize == "area":
+            for j, (top, bottom, left, right) in enumerate(self.frames[0].ROIs):
+                area = (bottom - top) * (right - left)
+                result[:, j] /= area
+
+        elif normalize == "exposure":
+            result = result / exposure_times[:, None]
+
+        elif normalize == "monitor":
+            result = result / monitor_signal[:, None]
+
+        elif normalize == "relative":
+            if relative_ref == "first":
+                baseline = result[0, :]
+            else:
+                name, N = relative_ref
+                baseline = result[:N].mean(axis=0)
+
+            baseline[baseline == 0] = np.nan
+            result = result / baseline
+
+        return result
+
+
+
+    def subtract_linear_background(self, roi_arr: np.ndarray, pad: int = 3) -> np.ndarray:
+        """
+        Estimate and subtract a linear 2D background plane using median values of ROI borders.
+
+        Parameters
+        ----------
+        roi_arr : np.ndarray
+            ROI image (2D array)
+        pad : int
+            Width in pixels of the "border" bands used to estimate background medians.
+
+        Returns
+        -------
+        np.ndarray
+            The ROI with the fitted background plane subtracted.
+        """
+
+        h, w = roi_arr.shape
+        pad = min(pad, h // 2, w // 2)
+
+        if pad == 0:
+            # fallback: subtract global median
+            return roi_arr - np.median(roi_arr)
+
+        # --- Extract borders ---
+        top = roi_arr[:pad, :]
+        bottom = roi_arr[-pad:, :]
+        left = roi_arr[:, :pad]
+        right = roi_arr[:, -pad:]
+
+        # --- Compute median of each border ---
+        med_top = np.median(top)
+        med_bottom = np.median(bottom)
+        med_left = np.median(left)
+        med_right = np.median(right)
+
+        # --- Build system of equations for plane fitting ---
+        # We define points at the center of each border
+        pts = np.array([
+            [w/2,        0,          1],   # top
+            [w/2,        h,          1],   # bottom
+            [0,          h/2,        1],   # left
+            [w,          h/2,        1],   # right
+        ])
+        vals = np.array([med_top, med_bottom, med_left, med_right])
+
+        # Solve least squares for plane: a*x + b*y + c
+        coeffs, *_ = np.linalg.lstsq(pts, vals, rcond=None)
+        a, b, c = coeffs
+
+        # Build coordinate grid
+        xx, yy = np.meshgrid(np.arange(w), np.arange(h))
+
+        # Compute fitted plane
+        bg_plane = a * xx + b * yy + c
+
+        
+
+        return bg_plane
+
     def set_outdir(self, outdir: Path | str = ".") -> None:
         self.outdir = Path(outdir).absolute()
         self.outdir.mkdir(parents=True, exist_ok=True)
@@ -469,6 +714,59 @@ class RHEEDAnalyzer:
 
     def get_radial_profile(self):
         return [frame.radial_profile.max() for frame in self.frames]
+    
+    def plot_integrated_ROIs(
+        self,
+        figsize: tuple[int, int] = (12, 6),
+        annulus_pad: int = 3,
+    ) -> None:
+        """
+        Plot intesities integrated over time for each ROI.
+        """
+        if self.data.size == 0:
+            raise ValueError("No data loaded")
+
+        if not self.timestamps:
+            raise ValueError("No timestamps available")
+
+        # Calcolo delle ROI integrate
+        integrated = self.integrate_and_normalize_ROIs(annulus_pad=annulus_pad)
+        num_ROIs = integrated.shape[1]
+
+        # Colori generici (se più di 3 ROI si generano automaticamente)
+        default_colors = ["blue", "red", "lime", "orange", "purple", "cyan"]
+        colors = (default_colors * (num_ROIs // len(default_colors) + 1))[:num_ROIs]
+
+        labels = [f"ROI {i+1}" for i in range(num_ROIs)]
+
+        fig = go.Figure(
+            layout=dict(
+                width=figsize[0] * 100,
+                height=figsize[1] * 100,
+                title="Integrated ROI Intensities Over Time"
+            )
+        )
+
+        for i in range(num_ROIs):
+            fig.add_trace(
+                go.Scatter(
+                    x=self.timestamps,
+                    y=integrated[:, i],
+                    mode="lines",
+                    name=labels[i],
+                    line=dict(color=colors[i], width=2),
+                    hovertemplate=(
+                        "Frame: %{customdata}"
+                        "<br>Time: %{x:.1f}s"
+                        "<br>Integrated intensity: %{y}"
+                    ),
+                    customdata=np.arange(len(self.timestamps)),
+                    hoverlabel=dict(namelength=0),
+                )
+            )
+
+        fig.show()
+
 
     def plot_sharpness_time_series(
         self,
