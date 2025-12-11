@@ -616,6 +616,8 @@ class RHEEDAnalyzer:
 
 
     def subtract_linear_background(self, roi_arr: np.ndarray, pad: int = 3) -> np.ndarray:
+
+    
         """
         Estimate and subtract a linear 2D background plane using median values of ROI borders.
 
@@ -674,6 +676,136 @@ class RHEEDAnalyzer:
         
 
         return bg_plane
+
+
+    def fit_single_gaussian_2d(self, roi: np.ndarray) -> tuple:
+        """
+        Fit a 2D Gaussian to a single ROI.
+
+        Parameters
+        ----------
+        roi : np.ndarray
+            2D background-subtracted ROI image.
+
+        Returns
+        -------
+        tuple
+            (amplitude, x0, y0, sigma_x, sigma_y, offset)
+        """
+        h, w = roi.shape
+
+        # Coordinate grid
+        x = np.arange(w)
+        y = np.arange(h)
+        xx, yy = np.meshgrid(x, y)
+
+        # Initial guess
+        amplitude0 = roi.max() - roi.min()
+        offset0 = roi.min()
+        y0_0, x0_0 = np.unravel_index(np.argmax(roi), roi.shape)
+
+        sigma_x0 = max(1, w / 4)
+        sigma_y0 = max(1, h / 4)
+
+        p0 = (amplitude0, x0_0, y0_0, sigma_x0, sigma_y0, offset0)
+
+        # Gaussian model
+        def gaussian_2d(xy, amplitude, xo, yo, sigma_x, sigma_y, offset):
+            x, y = xy
+            g = offset + amplitude * np.exp(
+                -(((x - xo) ** 2) / (2 * sigma_x ** 2) +
+                ((y - yo) ** 2) / (2 * sigma_y ** 2))
+            )
+            return g.ravel()
+
+        try:
+            popt, _ = curve_fit(
+                gaussian_2d,
+                (xx, yy),
+                roi.ravel(),
+                p0=p0,
+                maxfev=8000
+            )
+        except RuntimeError:
+            popt = p0
+
+        return tuple(popt)
+
+
+
+    def fit_all_bg_subtracted_ROIs(self, bg_method="annulus", annulus_pad=3):
+        """
+        Fit a 2D Gaussian to all background-subtracted ROIs.
+
+        Returns
+        -------
+        list[list[tuple]]
+            fit_params[frame][roi] = (amp, x0, y0, sigx, sigy, offset)
+        """
+        bg_sub = self.get_bg_subtracted_ROIs(bg_method=bg_method,
+                                            annulus_pad=annulus_pad)
+
+        all_fits = []
+
+        for frame_rois in bg_sub:           # loop sui frame
+            frame_fits = []
+            for roi in frame_rois:          # loop sulle ROI del frame
+                params = self.fit_single_gaussian_2d(roi)
+                frame_fits.append(params)
+            all_fits.append(frame_fits)
+
+        return all_fits
+
+
+    def gaussian_2d_function(self, x, y, A, x0, y0, sx, sy,offset=0):
+        return A * np.exp(
+            -(((x - x0) ** 2) / (2 * sx ** 2) +
+            ((y - y0) ** 2) / (2 * sy ** 2))
+        )
+
+
+    def build_gaussian_fit_arrays(self, bg_subtracted, fit_params):
+        """
+        Costruisce gli array 2D fittati per ogni ROI.
+
+        Parameters
+        ----------
+        bg_subtracted : list of list of 2D arrays
+            Output di get_bg_subtracted_ROIs()
+            bg_subtracted[frame][roi] = ROI 2D bg-subtracted
+
+        fit_params : list of list of tuples
+            Output di fit_all_bg_subtracted_ROIs()
+            fit_params[frame][roi] = (A, x0, y0, sx, sy)
+
+        Returns
+        -------
+        list of list of 2D arrays
+            fitted[frame][roi] = array 2D con la gaussiana fittata
+        """
+
+        fitted_all = []
+
+        for f_idx, frame_rois in enumerate(bg_subtracted):
+
+            fitted_frame = []
+
+            for r_idx, roi in enumerate(frame_rois):
+
+                A, x0, y0, sx, sy , offset= fit_params[f_idx][r_idx]
+
+                h, w = roi.shape
+                x = np.linspace(0, w - 1, w)
+                y = np.linspace(0, h - 1, h)
+                X, Y = np.meshgrid(x, y)
+
+                fit_array = self.gaussian_2d_function(X, Y, A, x0, y0, sx, sy,offset)
+
+                fitted_frame.append(fit_array)
+
+            fitted_all.append(fitted_frame)
+
+        return fitted_all
 
     def set_outdir(self, outdir: Path | str = ".") -> None:
         self.outdir = Path(outdir).absolute()
