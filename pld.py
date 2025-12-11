@@ -28,7 +28,16 @@ LATTICE_PARAMETER = 20
 
 
 class RHEEDFrame:
-    """Rappresenta un singolo frame RHEED con metodi per l'analisi e la visualizzazione."""
+    """Initialize a single RHEED frame with properies.
+    
+        
+        Args:
+            index: frame number
+            data: Array numpy 2D with img data
+            sigma: gaussian smoothening sigma
+            params: parameters for peak detection and ROI extraction
+            outdir: output directory for saving plots
+        """
     def __init__(
         self,
         index: int,
@@ -37,15 +46,7 @@ class RHEEDFrame:
         params: dict | None = None,
         outdir: Path | str = Path("."),
     ) -> None:
-        """Inizializza un frame RHEED con dati e parametri.
-        
-        Args:
-            index: Numero/ID del frame
-            data: Array numpy 2D con i dati dell'immagine
-            sigma: Valore di smussatura gaussiana (0 = nessuno)
-            params: Parametri personalizzati per l'analisi
-            outdir: Cartella di output per salvare risultati
-        """
+
         self.index = index
         normalized = data  # / np.max(data)
         self.data = (
@@ -116,6 +117,8 @@ class RHEEDFrame:
         return self._radial_profile
 
     def smooth(self, sigma: int = 2) -> "RHEEDFrame":
+        '''Modify RHEEDFrame by applying Gaussian smoothing with given sigma.
+        Returns a new RHEEDFrame instance with smoothed data.'''
         return RHEEDFrame(
             index=self.index,
             data=self._smoothen_data(self.data, sigma),
@@ -123,9 +126,13 @@ class RHEEDFrame:
         )
 
     def _smoothen_data(self, data: IntArray, sigma: int):
+        """Apply Gaussian smoothing to the data array.
+        Returns the smoothed data array."""
         return ndi.gaussian_filter(data, sigma=sigma)
 
     def normalize(self) -> "RHEEDFrame":
+        """Normalize the data to the range 0-255 as uint8.
+        Returns a new RHEEDFrame instance with normalized data."""
         normalized = cv2.normalize(
             self.data,
             None,
@@ -144,6 +151,8 @@ class RHEEDFrame:
         min_distance: int | None = None,
         threshold_rel: float = 0.0,
     ) -> list[tuple[int, int]]:
+        """find peak coordinates using skimage's peak_local_max. 
+        returns list of (x, y) tuples."""
         min_distance = min_distance or self.params["min_distance"]
         threshold_rel = threshold_rel or self.params["threshold_rel"]
         coordinates = peak_local_max(
@@ -155,41 +164,35 @@ class RHEEDFrame:
         return [(x, y) for y, x in coordinates]
 
     def get_roi_center(self, x: int, y: int, width: int, height: int) -> tuple[int, int]:
-        """Trova il centro della ROI considerando i picchi locali all'interno.
-        
-        Se ci sono 2 picchi vicini nella ROI, ritorna il centro tra i due.
-        Altrimenti ritorna il punto originale.
+        """find the center of the ROI, possibly adjusting to be between two peaks.
         """
-        # Estrai la regione candidata
+        # Extract region of interest around (x, y)
         left = max(x - width // 2, 0)
         right = min(x + width // 2, self.data.shape[1])
         top = max(y - height // 2, 0)
         bottom = min(y + height // 2, DIFFRACTION_BOTTOM_EDGE)
         
-        # Trova i picchi locali dentro questa regione con parametri sensibili
         roi_data = self.data[top:bottom, left:right]
         local_peaks = peak_local_max(
             roi_data,
-            min_distance=2,
+            min_distance=5,
             threshold_rel=0.1,
         )
         
-        # Converti coordinate relative a coordinate globali
         local_peaks_global = [(left + px, top + py) for py, px in local_peaks]
         
-        # Se ci sono 2 o più picchi, usa il centro tra i due più alti
+        # if there are at least 2 peaks, center between the two highest
         if len(local_peaks_global) >= 2:
-            # Prendi i due picchi più alti (maggiore intensità)
+            
             peak_intensities = [(px, py, self.data[py, px]) for px, py in local_peaks_global]
             peak_intensities.sort(key=lambda p: p[2], reverse=True)
             
             x1, y1 = peak_intensities[0][:2]
             x2, y2 = peak_intensities[1][:2]
-            
-            # Ritorna il centro tra i due picchi
+          
             return ((x1 + x2) // 2, (y1 + y2) // 2)
         
-        # Altrimenti ritorna il punto originale
+
         return (x, y)
 
     def get_regions_of_interest(
@@ -198,12 +201,7 @@ class RHEEDFrame:
         height: int | None = None,
         auto_center: bool = True,
     ):
-        """Estrae le regioni di interesse attorno ai 3 picchi centrali.
-        
-        Args:
-            width: Larghezza della ROI
-            height: Altezza della ROI
-            auto_center: Se True, centra la ROI tra 2 picchi se presenti
+        """Extract ROIs around central peaks.
         """
         width = width or self.params["width"]
         height = height or self.params["height"]
@@ -211,7 +209,7 @@ class RHEEDFrame:
         
         rois = []
         for x, y in sorted(central_peaks, key=lambda c: abs(c[0] - self.center[0])):
-            # Se auto_center è abilitato, trova il vero centro della ROI
+   
             if auto_center:
                 x, y = self.get_roi_center(x, y, width, height)
             
@@ -1061,9 +1059,9 @@ class RHEEDAnalyzer:
         start = int(start_time * 2)
         end = int(end_time * 2)
         for frame in self.frames[start:end]:
-            if frame.sharpness > 0.8:
-                score = 1.0  # Spots
-            elif frame.radial_profile[1] > 0.6:
+            #if frame.sharpness > 0.95:
+            #    score = 1.0  # Spots
+            if frame.radial_profile[1] > 0.6:
                 score = 0.83  # Streaks
             elif frame.radial_profile[2] > 0.5:
                 score = 0.67  # Satellite Streaks
@@ -1092,9 +1090,81 @@ class RHEEDAnalyzer:
             return np.nan
 
     def compute_oscillation_score(self, intensities: IntArray) -> float:
-        # Find peaks and valleys
-        peaks, _ = find_peaks(intensities)
-        valleys, _ = find_peaks(-intensities)
+        """
+        Compute a quantitative score describing the strength and persistence of RHEED oscillations.
+
+        This function analyzes an intensity-vs-time signal from RHEED specular spot measurements
+        and evaluates how clearly oscillations are present. It works by:
+
+        1. Detecting peaks (local maxima) and valleys (local minima) in the intensity signal.
+        If no peaks or valleys are found, the function returns 0, indicating that no
+        oscillatory behavior is detectable (typical of rough or 3D growth).
+
+        2. Pairing each peak with a corresponding valley and computing the absolute
+        peak-to-valley intensity differences. These differences represent the oscillation
+        amplitudes: larger values indicate stronger, cleaner oscillations.
+
+        3. Summing all peak-to-valley amplitudes and multiplying by the number of detected peaks.
+        This yields a score that captures both:
+            • oscillation strength (amplitude),
+            • and oscillation persistence (how many cycles occur).
+
+        A higher score therefore corresponds to well-defined, repeated RHEED oscillations,
+        characteristic of smooth, layer-by-layer epitaxial growth. A score of 0 indicates no
+        oscillations and typically corresponds to 3D, rough, or disordered surface growth.
+
+        Parameters
+        ----------
+        intensities : array-like
+            Sequence of RHEED specular spot intensities sampled over time.
+
+        Returns
+        -------
+        float
+            Oscillation quality score, proportional to the amplitude and number of oscillation cycles.
+        """
+      
+        from scipy.ndimage import gaussian_filter1d
+
+        def auto_prominence(intensities: np.ndarray, smooth_sigma: float = 1.0,
+                            noise_sigma: float = 5.0, k: float = 2.2) -> float:
+            """
+            Compute an automatic prominence threshold for peak detection
+            based on the estimated noise level in the RHEED intensity signal.
+
+            Parameters
+            ----------
+            intensities : np.ndarray
+                Raw intensity signal (1D array) from RHEED specular spot.
+            smooth_sigma : float
+                Sigma of the initial light smoothing (default: 1.0).
+                Used to reduce high-frequency noise before noise estimation.
+            noise_sigma : float
+                Sigma of the heavy smoothing used to estimate the 'trend'
+                from which noise is computed (default: 5.0).
+            k : float
+                Multiplier for noise level. Typical recommended values: 2.5 3.0.
+
+            Returns
+            -------
+            float
+                Suggested prominence value for scipy.signal.find_peaks().
+            """
+            # Step 1: light smoothing to reduce noise
+            clean = gaussian_filter1d(intensities, sigma=smooth_sigma)
+            # Step 2: estimate trend (heavy smoothing)
+            trend = gaussian_filter1d(clean, sigma=noise_sigma)
+            # Step 3: estimate noise = std of residuals
+            noise_level = np.std(clean - trend)
+            # Step 4: prominence = k × noise
+            prominence = k * noise_level
+
+            return float(prominence)
+
+
+
+        peaks, _ = find_peaks(intensities,prominence=auto_prominence(intensities))
+        valleys, _ = find_peaks(-intensities,prominence=auto_prominence(intensities))
 
         if len(peaks) == 0 or len(valleys) == 0:
             return 0  # No oscillations detected
@@ -1110,8 +1180,18 @@ class RHEEDAnalyzer:
 
     def analyze_quality(self, ROI_index: int) -> dict:
         intensities = [frame.peak_intensities[ROI_index] for frame in self.frames]
-        intensities = np.array(intensities)
+        intensities = np.array(intensities)/np.max(intensities)
+       # noise_level = np.std(intensities - gaussian_filter1d(intensities, sigma=5))
+
         return {
             "decay_rate": self.compute_decay_rate(intensities),
             "oscillation_score": self.compute_oscillation_score(intensities),
+        }
+    def analyze_quality_fit(self, ROI_index: int) -> dict:
+        fitted_params = self.fit_all_bg_subtracted_ROIs(bg_method="linear", annulus_pad=2)
+        amplitudes = [frame_params[ROI_index][0] for frame_params in fitted_params]
+        amplitudes = np.array(amplitudes)/np.max(amplitudes)
+        return {
+            "decay_rate": self.compute_decay_rate(amplitudes),
+            "oscillation_score": self.compute_oscillation_score(amplitudes),
         }
