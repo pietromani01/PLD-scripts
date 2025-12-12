@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 from scipy.fftpack import fft2, fftshift
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
+from scipy.signal import butter, filtfilt, hilbert
 from skimage.feature import peak_local_max
 
 IntArray = NDArray[np.int64]
@@ -1059,9 +1060,9 @@ class RHEEDAnalyzer:
         start = int(start_time * 2)
         end = int(end_time * 2)
         for frame in self.frames[start:end]:
-            #if frame.sharpness > 0.95:
-            #    score = 1.0  # Spots
-            if frame.radial_profile[1] > 0.6:
+            if frame.sharpness > 0.95:
+                score = 1.0  # Spots
+            elif frame.radial_profile[1] > 0.6:
                 score = 0.83  # Streaks
             elif frame.radial_profile[2] > 0.5:
                 score = 0.67  # Satellite Streaks
@@ -1123,48 +1124,10 @@ class RHEEDAnalyzer:
         float
             Oscillation quality score, proportional to the amplitude and number of oscillation cycles.
         """
-      
-        from scipy.ndimage import gaussian_filter1d
-
-        def auto_prominence(intensities: np.ndarray, smooth_sigma: float = 1.0,
-                            noise_sigma: float = 5.0, k: float = 2.2) -> float:
-            """
-            Compute an automatic prominence threshold for peak detection
-            based on the estimated noise level in the RHEED intensity signal.
-
-            Parameters
-            ----------
-            intensities : np.ndarray
-                Raw intensity signal (1D array) from RHEED specular spot.
-            smooth_sigma : float
-                Sigma of the initial light smoothing (default: 1.0).
-                Used to reduce high-frequency noise before noise estimation.
-            noise_sigma : float
-                Sigma of the heavy smoothing used to estimate the 'trend'
-                from which noise is computed (default: 5.0).
-            k : float
-                Multiplier for noise level. Typical recommended values: 2.5 3.0.
-
-            Returns
-            -------
-            float
-                Suggested prominence value for scipy.signal.find_peaks().
-            """
-            # Step 1: light smoothing to reduce noise
-            clean = gaussian_filter1d(intensities, sigma=smooth_sigma)
-            # Step 2: estimate trend (heavy smoothing)
-            trend = gaussian_filter1d(clean, sigma=noise_sigma)
-            # Step 3: estimate noise = std of residuals
-            noise_level = np.std(clean - trend)
-            # Step 4: prominence = k × noise
-            prominence = k * noise_level
-
-            return float(prominence)
 
 
-
-        peaks, _ = find_peaks(intensities,prominence=auto_prominence(intensities))
-        valleys, _ = find_peaks(-intensities,prominence=auto_prominence(intensities))
+        peaks, _ = find_peaks(intensities)
+        valleys, _ = find_peaks(-intensities)
 
         if len(peaks) == 0 or len(valleys) == 0:
             return 0  # No oscillations detected
@@ -1195,3 +1158,61 @@ class RHEEDAnalyzer:
             "decay_rate": self.compute_decay_rate(amplitudes),
             "oscillation_score": self.compute_oscillation_score(amplitudes),
         }
+    
+    def get_peak_intensities_fit(self)-> tuple[np.ndarray, np.ndarray, int]:
+
+        fitted_intensities = []
+        fitted_params = self.fit_all_bg_subtracted_ROIs(bg_method="linear", annulus_pad=2)
+        fitted_intensities = np.array([[frame_params[i][0] for i in range(3)]
+                             for frame_params in fitted_params])
+        return fitted_intensities
+    
+    def compute_oscillation_envelope(self, fs:int=2, low_cut_freq:int=0.02,order:int=3, osc_freq:int=None, bw:int=0.009) -> list[np.float64]:
+        """
+        Compute the oscillation envelope of the specular spot intensity over time.
+
+        This function identifies local maxima and minima in the intensity signal,
+        interpolates between them to create smooth upper and lower envelopes,
+        and returns the difference between these envelopes as a measure of oscillation amplitude.
+
+        Returns
+        -------
+        list[np.float64]
+            The oscillation envelope (upper - lower) at each time point.
+        
+        """
+        t = self.timestamps  
+        envelopes = [] 
+        oscillation=[]
+        intensities = self.get_peak_intensities_fit()
+
+        for ROI_index in range (len(self.frames[0].ROIs)):
+            
+            signal = intensities[:, ROI_index]
+            #signal = np.array(signal)/np.max(signal)
+            env = np.zeros_like(signal)
+            x = signal - np.mean(signal)
+            
+            if osc_freq is None:
+                N = len(x)
+                freqs = np.fft.rfftfreq(N, 1/fs)
+                Xf = np.abs(np.fft.rfft(x * np.hanning(N)))
+                # ignore very low freqs
+                low_cut = int(np.searchsorted(freqs, low_cut_freq))
+                peak_idx = np.argmax(Xf[low_cut:]) + low_cut
+                osc_freq = freqs[peak_idx]
+            
+            x_bp = self.bandpass_filter(x ,fs, osc_freq, bw=bw)
+            analytic = hilbert(x_bp)
+            env = np.abs(analytic)
+            envelopes.append(env)
+            oscillation.append(x_bp)
+
+        return envelopes, oscillation, osc_freq
+
+    def bandpass_filter(self, x, fs, f0, bw=0.5, order=3):
+        # f0 in Hz (oscillation frequency), bw = half-width in Hz
+        low = max(0.0001, f0 - bw)
+        high = min(0.5*fs - 1e-6, f0 + bw)
+        b, a = butter(order, [low/(0.5*fs), high/(0.5*fs)], btype='band')
+        return filtfilt(b, a, x)
